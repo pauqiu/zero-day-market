@@ -1,0 +1,9 @@
+# Database configuration read by app.cgi.
+# Install as /etc/jesterschest/db.conf, owned by root:apache, mode 0640:
+#   sudo install -d -m 0750 -o root -g apache /etc/jesterschest
+#   sudo install -m 0640 -o root -g apache db.conf /etc/jesterschest/db.conf
+host = 192.168.161.20
+port = 3306
+user = jc_app
+password = CHANGE-ME
+database = jesterschest

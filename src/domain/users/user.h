@@ -29,4 +29,4 @@ class User {
         ~User();
 };
 
-#endif USER_H // USER_H
+#endif // USER_H

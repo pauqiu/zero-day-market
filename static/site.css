@@ -1,0 +1,87 @@
+:root {
+    --ink: #231a2b;
+    --muted: #6a6172;
+    --surface: #ffffff;
+    --line: #e4dfe8;
+    --accent: #5b2a7a;
+    --stripe: #f7f4f9;
+    color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --ink: #ece6f1;
+        --muted: #a69cb0;
+        --surface: #17121c;
+        --line: #352c3d;
+        --accent: #c9a3e6;
+        --stripe: #1e1825;
+        color-scheme: dark;
+    }
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    background: var(--surface);
+    color: var(--ink);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.site-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.25rem 1rem;
+    padding: 1rem clamp(1rem, 4vw, 3rem);
+    border-bottom: 1px solid var(--line);
+}
+
+.brand {
+    color: var(--accent);
+    font: 600 1.5rem/1.2 "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
+    text-decoration: none;
+}
+
+.market { color: var(--muted); font-size: 0.9rem; }
+
+main {
+    max-width: 64rem;
+    margin: 0 auto;
+    padding: 2rem clamp(1rem, 4vw, 3rem);
+}
+
+h1 {
+    margin: 0 0 0.25rem;
+    font: 600 2rem/1.2 "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
+}
+
+.summary { margin: 0 0 1.5rem; color: var(--muted); }
+
+a { color: var(--accent); }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.table-wrap { overflow-x: auto; }
+
+table { width: 100%; border-collapse: collapse; }
+
+th, td {
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--line);
+    text-align: left;
+    vertical-align: top;
+}
+
+th { font-size: 0.85rem; font-weight: 600; color: var(--muted); }
+tbody tr:nth-child(even) { background: var(--stripe); }
+td.id { color: var(--muted); font-variant-numeric: tabular-nums; }
+td.unowned { color: var(--muted); font-style: italic; }
+
+.pager {
+    display: flex;
+    gap: 1.5rem;
+    justify-content: center;
+    align-items: center;
+    margin-top: 1.5rem;
+}
