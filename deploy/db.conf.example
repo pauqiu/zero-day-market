@@ -7,3 +7,6 @@ port = 3306
 user = jc_app
 password = CHANGE-ME
 database = jesterschest
+# CA that signed VMDatos' certificate (for a self-signed certificate, the
+# certificate itself). The connection fails if the server does not match it.
+ssl_ca = /etc/jesterschest/mariadb-ca.crt

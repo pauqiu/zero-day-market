@@ -9,6 +9,9 @@ struct DbConfig {
     std::string user;
     std::string password;
     std::string database;
+    // CA certificate that signed the database server's certificate. The
+    // connection always uses TLS and verifies the server against it.
+    std::string sslCa;
 };
 
 // Reads a "key = value" file (see deploy/db.conf.example). The file lives

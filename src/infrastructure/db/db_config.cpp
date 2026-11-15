@@ -55,12 +55,15 @@ DbConfig loadDbConfig(const std::string& path)
             config.password = value;
         } else if (key == "database") {
             config.database = value;
+        } else if (key == "ssl_ca") {
+            config.sslCa = value;
         }
         // Unknown keys are ignored so the file can grow without breaking.
     }
 
-    if (config.host.empty() || config.user.empty() || config.database.empty()) {
-        throw DatabaseError("database configuration needs host, user and database");
+    if (config.host.empty() || config.user.empty() || config.database.empty() ||
+        config.sslCa.empty()) {
+        throw DatabaseError("database configuration needs host, user, database and ssl_ca");
     }
     return config;
 }

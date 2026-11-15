@@ -24,6 +24,15 @@ MariaDbConnection::MariaDbConnection(const DbConfig& config)
     mysql_options(mysql, MYSQL_OPT_LOCAL_INFILE, &localInfile);
     mysql_options(mysql, MYSQL_SET_CHARSET_NAME, "utf8mb4");
 
+    // Always TLS (the server has require_secure_transport = ON), and refuse
+    // to continue if the server's certificate is not signed by our CA or does
+    // not match the host we connect to.
+    my_bool enforceTls = 1;
+    my_bool verifyServer = 1;
+    mysql_options(mysql, MYSQL_OPT_SSL_ENFORCE, &enforceTls);
+    mysql_options(mysql, MYSQL_OPT_SSL_CA, config.sslCa.c_str());
+    mysql_options(mysql, MYSQL_OPT_SSL_VERIFY_SERVER_CERT, &verifyServer);
+
     if (mysql_real_connect(mysql, config.host.c_str(), config.user.c_str(),
                            config.password.c_str(), config.database.c_str(),
                            config.port, nullptr, 0) == nullptr) {
