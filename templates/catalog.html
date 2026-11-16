@@ -1,0 +1,43 @@
+{{! Public catalog (HU-01). }}
+<h1>Catálogo</h1>
+
+{{^objects}}
+<p>Todavía no hay objetos en el catálogo.</p>
+{{/objects}}
+
+{{#hasObjects}}
+<p class="summary">
+  {{totalObjects}} {{#oneObject}}objeto{{/oneObject}}{{^oneObject}}objetos{{/oneObject}} en el mercado.
+</p>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th scope="col">ID</th>
+        <th scope="col">Objeto</th>
+        <th scope="col">Descripción</th>
+        <th scope="col">Propietario</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{#objects}}
+      <tr>
+        <td class="id">{{id}}</td>
+        <td><a href="{{detailUrl}}">{{name}}</a></td>
+        <td>{{description}}</td>
+        {{#hasOwner}}<td>{{owner}}</td>{{/hasOwner}}{{^hasOwner}}<td class="unowned">Inventario del mercado</td>{{/hasOwner}}
+      </tr>
+      {{/objects}}
+    </tbody>
+  </table>
+</div>
+
+{{#showPager}}
+<nav class="pager" aria-label="Páginas del catálogo">
+  {{#hasPrevious}}<a href="{{previousUrl}}">Anterior</a>{{/hasPrevious}}
+  <span>Página {{page}} de {{totalPages}}</span>
+  {{#hasNext}}<a href="{{nextUrl}}">Siguiente</a>{{/hasNext}}
+</nav>
+{{/showPager}}
+{{/hasObjects}}

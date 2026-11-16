@@ -10,6 +10,7 @@
 #include "presentation/pages/catalog_page.h"
 #include "presentation/pages/html.h"
 #include "presentation/router.h"
+#include "presentation/templates/template_engine.h"
 
 namespace {
 
@@ -100,11 +101,93 @@ void testCatalogPageEscapesData()
     CatalogPage page;
     page.totalObjects = 1;
     page.items.push_back({7, "<b>Joya</b>", "a & b", std::nullopt});
-    const std::string html = renderCatalogBody(page, "/app.cgi");
+    const std::string html = renderCatalogBody(page, "/app.cgi").str();
     CHECK(html.find("<b>Joya</b>") == std::string::npos);
     CHECK(html.find("&lt;b&gt;Joya&lt;/b&gt;") != std::string::npos);
     CHECK(html.find("Inventario del mercado") != std::string::npos);
     CHECK(html.find("/app.cgi/objeto?id=7") != std::string::npos);
+}
+
+bool throwsTemplateError(std::string_view source, const TemplateContext& context)
+{
+    try {
+        renderTemplate(source, context);
+    } catch (const TemplateError&) {
+        return true;
+    }
+    return false;
+}
+
+void testTemplateEngine()
+{
+    TemplateContext context;
+    context.setText("name", "<b>Joya</b> & 'co'").setFlag("yes", true).setFlag("no", false);
+
+    // Text is always escaped.
+    CHECK(renderTemplate("[{{name}}]", context).str() ==
+          "[&lt;b&gt;Joya&lt;/b&gt; &amp; &#39;co&#39;]");
+    CHECK(renderTemplate("{{ name }}", context).str() == renderTemplate("{{name}}", context).str());
+
+    // Flags and inverted sections.
+    CHECK(renderTemplate("{{#yes}}A{{/yes}}{{#no}}B{{/no}}{{^no}}C{{/no}}", context).str() == "AC");
+
+    // Lists: one rendering per item; inner names shadow outer ones.
+    std::vector<TemplateContext> items(2);
+    items[0].setText("name", "uno");
+    items[1].setText("name", "dos");
+    TemplateContext listContext;
+    listContext.setList("items", items).setText("sep", ",").setList("empty", {});
+    CHECK(renderTemplate("{{#items}}{{name}}{{sep}}{{/items}}", listContext).str() == "uno,dos,");
+    CHECK(renderTemplate("{{^empty}}vacío{{/empty}}{{#empty}}x{{/empty}}", listContext).str() == "vacío");
+
+    // Raw insertion only for Html produced by the engine.
+    TemplateContext page;
+    page.setHtml("body", renderTemplate("<p>{{name}}</p>", context)).setText("text", "<i>");
+    CHECK(renderTemplate("{{{body}}}", page).str() ==
+          "<p>&lt;b&gt;Joya&lt;/b&gt; &amp; &#39;co&#39;</p>");
+    CHECK(throwsTemplateError("{{{text}}}", page));  // Text cannot be inserted raw
+    CHECK(throwsTemplateError("{{body}}", page));    // Html in {{ }} is a mistake
+
+    // Mistakes are errors, not silent output.
+    CHECK(throwsTemplateError("{{missing}}", context));
+    CHECK(throwsTemplateError("{{#yes}}open", context));
+    CHECK(throwsTemplateError("{{/yes}}", context));
+    CHECK(throwsTemplateError("{{#yes}}{{/no}}", context));
+    CHECK(throwsTemplateError("{{name", context));
+    CHECK(throwsTemplateError("{{bad-name}}", context));
+    CHECK(throwsTemplateError("{{#name}}x{{/name}}", context));  // text is not a section
+    CHECK(renderTemplate("a{{! comment }}b", context).str() == "ab");
+
+    // Section tags alone on their line leave no blank lines behind.
+    CHECK(renderTemplate("a\n  {{#yes}}\n  b\n  {{/yes}}\nc", context).str() == "a\n  b\nc");
+    CHECK(renderTemplate("{{#no}}\nx\n{{/no}}\nc", context).str() == "c");
+    CHECK(renderTemplate("{{! note }}\nc", context).str() == "c");
+    // Inline tags keep the surrounding text intact.
+    CHECK(renderTemplate("<td>{{#yes}}si{{/yes}}</td>\n", context).str() == "<td>si</td>\n");
+}
+
+void testEmbeddedTemplatesRender()
+{
+    // Every page template must render with realistic data (catches typos).
+    CatalogPage empty;
+    CHECK(renderCatalogBody(empty, "/app.cgi").str().find("Todavía no hay objetos") !=
+          std::string::npos);
+
+    CatalogPage many;
+    many.totalObjects = 45;
+    many.totalPages = 3;
+    many.page = 2;
+    many.items.push_back({1, "Uno", "", std::string("ana")});
+    const std::string html = renderCatalogBody(many, "/app.cgi").str();
+    CHECK(html.find("45 objetos") != std::string::npos);
+    CHECK(html.find("/app.cgi/catalogo?page=1") != std::string::npos);
+    CHECK(html.find("/app.cgi/catalogo?page=3") != std::string::npos);
+    CHECK(html.find("<td>ana</td>") != std::string::npos);
+
+    CatalogPage one;
+    one.totalObjects = 1;
+    one.items.push_back({1, "Uno", "", std::nullopt});
+    CHECK(renderCatalogBody(one, "/app.cgi").str().find("1 objeto en") != std::string::npos);
 }
 
 void testRouter()
@@ -134,6 +217,8 @@ int main()
     testParsePositiveInt();
     testListCatalogPagination();
     testCatalogPageEscapesData();
+    testTemplateEngine();
+    testEmbeddedTemplatesRender();
     testRouter();
 
     if (failures == 0) {

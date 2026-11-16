@@ -3,12 +3,13 @@
 
 #include <string>
 
-// Wraps a page body in the common document. `title` is plain text and is
-// escaped here; `bodyHtml` must already be safe HTML.
-std::string renderLayout(const std::string& title, const std::string& bodyHtml,
-                         const std::string& scriptName);
+#include "presentation/templates/template_engine.h"
 
-std::string renderErrorBody(const std::string& heading, const std::string& message,
-                            const std::string& scriptName);
+// Complete document (templates/layout.html) around a rendered page body.
+Html renderPage(const std::string& title, const Html& body, const std::string& scriptName);
+
+// Body of an error page (templates/error.html).
+Html renderErrorBody(const std::string& heading, const std::string& message,
+                     const std::string& scriptName);
 
 #endif // LAYOUT_H

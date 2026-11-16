@@ -51,8 +51,23 @@ add_library(infrastructure STATIC
 )
 target_link_libraries(infrastructure PUBLIC application PkgConfig::MARIADB)
 
+# --- HTML templates, embedded into the binary at build time ------------------
+file(GLOB TEMPLATE_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/templates/*.html")
+set(EMBEDDED_TEMPLATES "${CMAKE_BINARY_DIR}/generated/template_sources.cpp")
+add_custom_command(
+  OUTPUT "${EMBEDDED_TEMPLATES}"
+  COMMAND "${CMAKE_COMMAND}"
+          -DTEMPLATE_DIR=${CMAKE_SOURCE_DIR}/templates
+          -DOUTPUT=${EMBEDDED_TEMPLATES}
+          -P "${CMAKE_SOURCE_DIR}/cmake/embed_templates.cmake"
+  DEPENDS ${TEMPLATE_FILES} "${CMAKE_SOURCE_DIR}/cmake/embed_templates.cmake"
+  COMMENT "Embedding HTML templates"
+)
+
 # --- Presentation: CGI request/response, routing and HTML -------------------
 add_library(presentation STATIC
+  src/presentation/templates/template_engine.cpp
+  "${EMBEDDED_TEMPLATES}"
   src/presentation/cgi/cgi_request.cpp
   src/presentation/cgi/cgi_response.cpp
   src/presentation/pages/html.cpp

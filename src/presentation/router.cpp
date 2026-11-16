@@ -21,8 +21,8 @@ CgiResponse handleCatalog(const CgiRequest& request, const UseCases& useCases)
     const CatalogPage page = useCases.listCatalog(requestedPage);
 
     CgiResponse response;
-    response.body = renderLayout("Catálogo", renderCatalogBody(page, request.scriptName()),
-                                 request.scriptName());
+    response.body = renderPage("Catálogo", renderCatalogBody(page, request.scriptName()),
+                               request.scriptName()).str();
     return response;
 }
 
@@ -34,8 +34,8 @@ CgiResponse errorResponse(int status, const std::string& heading,
     CgiResponse response;
     response.status = status;
     response.headers.emplace_back("Cache-Control", "no-store");
-    response.body = renderLayout(heading, renderErrorBody(heading, message, scriptName),
-                                 scriptName);
+    response.body = renderPage(heading, renderErrorBody(heading, message, scriptName),
+                               scriptName).str();
     return response;
 }
 
