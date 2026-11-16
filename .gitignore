@@ -69,3 +69,6 @@ Testing/
 
 # vscode
 .vscode/
+# CMake build directories (scripts/dev-deploy.sh)
+build/
+build-*/
