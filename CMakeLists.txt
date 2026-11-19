@@ -47,6 +47,7 @@ target_include_directories(domain PUBLIC src)
 add_library(application STATIC
   src/application/catalog/list_catalog.cpp
   src/application/objects/get_object_detail.cpp
+  src/application/objects/get_object_history.cpp
 )
 target_link_libraries(application PUBLIC domain)
 
@@ -56,6 +57,7 @@ add_library(infrastructure STATIC
   src/infrastructure/db/mariadb_connection.cpp
   src/infrastructure/db/mariadb_catalog_repository.cpp
   src/infrastructure/db/mariadb_object_detail_repository.cpp
+  src/infrastructure/db/mariadb_object_history_repository.cpp
 )
 target_link_libraries(infrastructure PUBLIC application PkgConfig::MARIADB)
 
@@ -82,6 +84,7 @@ add_library(presentation STATIC
   src/presentation/pages/layout.cpp
   src/presentation/pages/catalog_page.cpp
   src/presentation/pages/formatting.cpp
+  src/presentation/pages/history_page.cpp
   src/presentation/pages/object_page.cpp
   src/presentation/router.cpp
 )

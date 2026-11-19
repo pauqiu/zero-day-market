@@ -7,10 +7,12 @@
 
 #include "application/catalog/list_catalog.h"
 #include "application/objects/get_object_detail.h"
+#include "application/objects/get_object_history.h"
 #include "domain/objects/transfer_rules.h"
 #include "presentation/cgi/cgi_request.h"
 #include "presentation/pages/catalog_page.h"
 #include "presentation/pages/formatting.h"
+#include "presentation/pages/history_page.h"
 #include "presentation/pages/html.h"
 #include "presentation/pages/object_page.h"
 #include "presentation/router.h"
@@ -283,6 +285,72 @@ void testObjectPage()
     CHECK(html2.find("<table>") == std::string::npos);
 }
 
+class FakeObjectHistoryRepository : public ObjectHistoryRepository {
+    public:
+        std::optional<std::string> name;
+        std::vector<TransferEntry> transfers;
+        int transferQueries = 0;
+
+        std::optional<std::string> findObjectName(int) override { return name; }
+
+        std::vector<TransferEntry> listTransfers(int) override
+        {
+            ++transferQueries;
+            return transfers;
+        }
+};
+
+void testGetObjectHistory()
+{
+    FakeObjectHistoryRepository repository;
+    GetObjectHistory getHistory(repository);
+
+    CHECK(!getHistory.execute(4));                 // unknown object
+    CHECK(repository.transferQueries == 0);
+
+    repository.name = "Atlas";
+    repository.transfers.push_back({1, TransferType::Donation, std::string("ana"), "luis",
+                                    std::nullopt, std::nullopt});
+    const auto history = getHistory.execute(4);
+    CHECK(history && history->objectID == 4 && history->objectName == "Atlas");
+    CHECK(history->transfers.size() == 1);
+}
+
+void testHistoryPage()
+{
+    ObjectHistory history;
+    history.objectID = 9;
+    history.objectName = "<i>Atlas</i>";
+    history.transfers.push_back({1'795'120'500, TransferType::Trade, std::string("ana"), "luis",
+                                 12, std::string("Mapa <b>raro</b>")});
+    history.transfers.push_back({1'795'000'000, TransferType::Donation, std::string("luis"), "ana",
+                                 std::nullopt, std::nullopt});
+    history.transfers.push_back({1'794'900'000, TransferType::InitialAllocation, std::nullopt,
+                                 "luis", std::nullopt, std::nullopt});
+
+    const std::string html = renderHistoryBody(history, "/app.cgi").str();
+    CHECK(html.find("<i>Atlas</i>") == std::string::npos);
+    CHECK(html.find("&lt;i&gt;Atlas&lt;/i&gt;") != std::string::npos);
+    CHECK(html.find("Trueque") != std::string::npos);
+    CHECK(html.find("Donación") != std::string::npos);
+    CHECK(html.find("Dotación inicial") != std::string::npos);
+    CHECK(html.find("Inventario del mercado") != std::string::npos);       // initial allocation
+    CHECK(html.find("/app.cgi/objeto?id=12") != std::string::npos);       // RF-1.12
+    CHECK(html.find("Mapa &lt;b&gt;raro&lt;/b&gt;") != std::string::npos);
+    CHECK(html.find("19/11/2026 14:35") != std::string::npos);
+    CHECK(html.find("<form") == std::string::npos);                       // RF-1.13: read-only
+    // Order is kept as given by the repository (newest first).
+    CHECK(html.find("Trueque") < html.find("Donación"));
+    CHECK(html.find("Donación") < html.find("Dotación inicial"));
+
+    ObjectHistory empty;
+    empty.objectID = 3;
+    empty.objectName = "Herbario";
+    const std::string html2 = renderHistoryBody(empty, "/app.cgi").str();
+    CHECK(html2.find("todavía no ha sido transferido") != std::string::npos);
+    CHECK(html2.find("<table>") == std::string::npos);
+}
+
 void testRouter()
 {
     UseCases useCases;
@@ -319,6 +387,21 @@ void testRouter()
     CHECK(route(CgiRequest("GET", "/objeto", "/app.cgi", "id=0"), useCases).status == 400);
     CHECK(requestedObject == 0);  // invalid IDs never reach the use case
     CHECK(route(CgiRequest("POST", "/objeto", "/app.cgi", "id=5"), useCases).status == 405);
+
+    useCases.getObjectHistory = [](int objectID) -> std::optional<ObjectHistory> {
+        if (objectID != 5) {
+            return std::nullopt;
+        }
+        ObjectHistory history;
+        history.objectID = 5;
+        history.objectName = "Atlas";
+        return history;
+    };
+    CHECK(route(CgiRequest("GET", "/historial", "/app.cgi", "id=5"), useCases).status == 200);
+    CHECK(route(CgiRequest("GET", "/historial", "/app.cgi", "id=6"), useCases).status == 404);
+    CHECK(route(CgiRequest("GET", "/historial", "/app.cgi", "id=x"), useCases).status == 400);
+    CHECK(route(CgiRequest("GET", "/historial", "/app.cgi", ""), useCases).status == 400);
+    CHECK(route(CgiRequest("POST", "/historial", "/app.cgi", "id=5"), useCases).status == 405);
 }
 
 }  // namespace
@@ -335,6 +418,8 @@ int main()
     testGetObjectDetail();
     testFormatting();
     testObjectPage();
+    testGetObjectHistory();
+    testHistoryPage();
     testTemplateEngine();
     testEmbeddedTemplatesRender();
     testRouter();

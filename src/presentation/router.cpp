@@ -1,6 +1,7 @@
 #include "presentation/router.h"
 
 #include "presentation/pages/catalog_page.h"
+#include "presentation/pages/history_page.h"
 #include "presentation/pages/layout.h"
 #include "presentation/pages/object_page.h"
 
@@ -27,29 +28,66 @@ CgiResponse handleCatalog(const CgiRequest& request, const UseCases& useCases)
     return response;
 }
 
-CgiResponse handleObject(const CgiRequest& request, const UseCases& useCases)
+// Reads ?id= for the object pages. On failure, `error` holds the 400 response.
+std::optional<int> objectIDParam(const CgiRequest& request, CgiResponse& error)
 {
     const auto idParam = request.queryParam("id");
     if (!idParam) {
-        return errorResponse(400, "Solicitud incompleta",
-                             "Falta el identificador del objeto.", request.scriptName());
+        error = errorResponse(400, "Solicitud incompleta",
+                              "Falta el identificador del objeto.", request.scriptName());
+        return std::nullopt;
     }
     const auto objectID = parsePositiveInt(*idParam);
     if (!objectID) {
-        return errorResponse(400, "Identificador inválido",
-                             "El identificador del objeto debe ser un entero positivo.",
-                             request.scriptName());
+        error = errorResponse(400, "Identificador inválido",
+                              "El identificador del objeto debe ser un entero positivo.",
+                              request.scriptName());
+    }
+    return objectID;
+}
+
+CgiResponse objectNotFound(const CgiRequest& request)
+{
+    return errorResponse(404, "Objeto no encontrado",
+                         "El objeto solicitado no existe en el mercado.", request.scriptName());
+}
+
+CgiResponse handleObject(const CgiRequest& request, const UseCases& useCases)
+{
+    CgiResponse error;
+    const std::optional<int> objectID = objectIDParam(request, error);
+    if (!objectID) {
+        return error;
     }
 
     const std::optional<ObjectDetail> detail = useCases.getObjectDetail(*objectID);
     if (!detail) {
-        return errorResponse(404, "Objeto no encontrado",
-                             "El objeto solicitado no existe en el mercado.", request.scriptName());
+        return objectNotFound(request);
     }
 
     CgiResponse response;
     response.body = renderPage(detail->object.name,
                                renderObjectBody(*detail, request.scriptName()),
+                               request.scriptName()).str();
+    return response;
+}
+
+CgiResponse handleHistory(const CgiRequest& request, const UseCases& useCases)
+{
+    CgiResponse error;
+    const std::optional<int> objectID = objectIDParam(request, error);
+    if (!objectID) {
+        return error;
+    }
+
+    const std::optional<ObjectHistory> history = useCases.getObjectHistory(*objectID);
+    if (!history) {
+        return objectNotFound(request);
+    }
+
+    CgiResponse response;
+    response.body = renderPage("Historial de " + history->objectName,
+                               renderHistoryBody(*history, request.scriptName()),
                                request.scriptName()).str();
     return response;
 }
@@ -90,6 +128,9 @@ CgiResponse route(const CgiRequest& request, const UseCases& useCases)
     }
     if (path == "/objeto") {
         return handleObject(request, useCases);
+    }
+    if (path == "/historial") {
+        return handleHistory(request, useCases);
     }
 
     return errorResponse(404, "Página no encontrada",

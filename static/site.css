@@ -116,3 +116,6 @@ h2 {
 .status.blocked { background: var(--stripe); }
 .status.inventory { color: var(--muted); }
 .history-link { margin-top: 1.5rem; }
+
+/* Transfer history (HU-03) */
+td.nowrap { white-space: nowrap; font-variant-numeric: tabular-nums; }

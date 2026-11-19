@@ -6,10 +6,12 @@
 
 #include "application/catalog/list_catalog.h"
 #include "application/objects/get_object_detail.h"
+#include "application/objects/get_object_history.h"
 #include "infrastructure/db/db_config.h"
 #include "infrastructure/db/mariadb_catalog_repository.h"
 #include "infrastructure/db/mariadb_connection.h"
 #include "infrastructure/db/mariadb_object_detail_repository.h"
+#include "infrastructure/db/mariadb_object_history_repository.h"
 #include "presentation/cgi/cgi_request.h"
 #include "presentation/router.h"
 
@@ -35,6 +37,13 @@ int main()
         MariaDbObjectDetailRepository repository(connection);
         GetObjectDetail getObjectDetail(repository);
         return getObjectDetail.execute(objectID);
+    };
+    useCases.getObjectHistory = [](int objectID) {
+        const DbConfig config = loadDbConfig(JC_DB_CONFIG_PATH);
+        MariaDbConnection connection(config);
+        MariaDbObjectHistoryRepository repository(connection);
+        GetObjectHistory getObjectHistory(repository);
+        return getObjectHistory.execute(objectID);
     };
 
     CgiResponse response;

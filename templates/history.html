@@ -1,0 +1,35 @@
+{{! Public transfer history of an object (HU-03). Read-only: no forms (RF-1.13). }}
+<p class="breadcrumb"><a href="{{catalogUrl}}">Catálogo</a> › <a href="{{detailUrl}}">{{objectName}}</a></p>
+<h1>Historial de transferencias</h1>
+<p class="object-id">{{objectName}} · Objeto #{{id}}</p>
+
+{{^transfers}}
+<p class="muted">Este objeto todavía no ha sido transferido: sigue en el inventario del mercado.</p>
+{{/transfers}}
+{{#hasTransfers}}
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th scope="col">Fecha</th>
+        <th scope="col">Operación</th>
+        <th scope="col">De</th>
+        <th scope="col">Para</th>
+        <th scope="col">A cambio de</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{#transfers}}
+      <tr>
+        <td class="nowrap">{{date}}</td>
+        <td>{{operation}}</td>
+        {{#hasFrom}}<td>{{from}}</td>{{/hasFrom}}{{^hasFrom}}<td class="unowned">Inventario del mercado</td>{{/hasFrom}}
+        <td>{{to}}</td>
+        {{#hasExchange}}<td><a href="{{exchangeUrl}}">{{exchangeName}}</a></td>{{/hasExchange}}{{^hasExchange}}<td class="muted">—</td>{{/hasExchange}}
+      </tr>
+      {{/transfers}}
+    </tbody>
+  </table>
+</div>
+{{/hasTransfers}}
+<p class="note">Horas en tiempo de Costa Rica.</p>
