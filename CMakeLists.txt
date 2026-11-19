@@ -12,8 +12,13 @@ endif()
 set(JC_DB_CONFIG_PATH "/etc/jesterschest/db.conf"
     CACHE STRING "Path of the database configuration file read by the CGI")
 
+option(JC_WERROR "Treat compiler warnings as errors" ON)
+
 # Hardening flags (see the security architecture document).
-add_compile_options(-Wall -Wextra -Wpedantic -Werror -fstack-protector-strong -fPIE)
+add_compile_options(-Wall -Wextra -Wpedantic -fstack-protector-strong -fPIE)
+if(JC_WERROR)
+  add_compile_options(-Werror)
+endif()
 add_link_options(-pie -Wl,-z,relro,-z,now)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")

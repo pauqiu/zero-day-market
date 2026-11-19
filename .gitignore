@@ -72,3 +72,4 @@ Testing/
 # CMake build directories (scripts/dev-deploy.sh)
 build/
 build-*/
+dist/
