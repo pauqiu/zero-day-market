@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.18)
 project(zero_day_market CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -11,6 +11,8 @@ endif()
 
 set(JC_DB_CONFIG_PATH "/etc/jesterschest/db.conf"
     CACHE STRING "Path of the database configuration file read by the CGI")
+set(JC_MASTER_KEY_PATH "/etc/jesterschest/yubikey-master.key"
+    CACHE STRING "Path of the master key that seals the YubiKey secrets")
 
 option(JC_WERROR "Treat compiler warnings as errors" ON)
 
@@ -33,6 +35,9 @@ endif()
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MARIADB REQUIRED IMPORTED_TARGET libmariadb)
+find_package(OpenSSL REQUIRED)
+find_path(YUBIKEY_INCLUDE_DIR yubikey.h REQUIRED)
+find_library(YUBIKEY_LIBRARY yubikey REQUIRED)
 
 # --- Domain: entities and business rules, no external dependencies ----------
 add_library(domain STATIC
@@ -40,11 +45,13 @@ add_library(domain STATIC
   src/domain/objects/object.cpp
   src/domain/locals/local.cpp
   src/domain/objects/transfer_rules.cpp
+  src/domain/users/account_rules.cpp
 )
 target_include_directories(domain PUBLIC src)
 
 # --- Application: use cases and the ports they need -------------------------
 add_library(application STATIC
+  src/application/accounts/register_user.cpp
   src/application/catalog/list_catalog.cpp
   src/application/objects/get_object_detail.cpp
   src/application/objects/get_object_history.cpp
@@ -53,13 +60,20 @@ target_link_libraries(application PUBLIC domain)
 
 # --- Infrastructure: MariaDB, configuration, (later) mail, files, crypto -----
 add_library(infrastructure STATIC
+  src/infrastructure/crypto/aes_gcm_secret_box.cpp
+  src/infrastructure/crypto/hex.cpp
+  src/infrastructure/crypto/scrypt_password_hasher.cpp
   src/infrastructure/db/db_config.cpp
+  src/infrastructure/db/mariadb_account_repository.cpp
   src/infrastructure/db/mariadb_connection.cpp
   src/infrastructure/db/mariadb_catalog_repository.cpp
   src/infrastructure/db/mariadb_object_detail_repository.cpp
   src/infrastructure/db/mariadb_object_history_repository.cpp
+  src/infrastructure/yubikey/libyubikey_otp_decoder.cpp
 )
-target_link_libraries(infrastructure PUBLIC application PkgConfig::MARIADB)
+target_include_directories(infrastructure SYSTEM PRIVATE "${YUBIKEY_INCLUDE_DIR}")
+target_link_libraries(infrastructure PUBLIC application PkgConfig::MARIADB
+                      OpenSSL::Crypto "${YUBIKEY_LIBRARY}")
 
 # --- HTML templates, embedded into the binary at build time ------------------
 file(GLOB TEMPLATE_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/templates/*.html")
@@ -86,6 +100,7 @@ add_library(presentation STATIC
   src/presentation/pages/formatting.cpp
   src/presentation/pages/history_page.cpp
   src/presentation/pages/object_page.cpp
+  src/presentation/pages/register_page.cpp
   src/presentation/router.cpp
 )
 target_link_libraries(presentation PUBLIC application)
@@ -93,11 +108,19 @@ target_link_libraries(presentation PUBLIC application)
 # --- CGI executable: composition root ---------------------------------------
 add_executable(webapp src/main.cpp)
 set_target_properties(webapp PROPERTIES OUTPUT_NAME "app.cgi")
-target_compile_definitions(webapp PRIVATE JC_DB_CONFIG_PATH="${JC_DB_CONFIG_PATH}")
+target_compile_definitions(webapp PRIVATE JC_DB_CONFIG_PATH="${JC_DB_CONFIG_PATH}"
+                                          JC_MASTER_KEY_PATH="${JC_MASTER_KEY_PATH}")
 target_link_libraries(webapp PRIVATE presentation infrastructure)
 
 # --- Tests (plain CTest, no third-party framework) --------------------------
 enable_testing()
 add_executable(unit_tests tests/unit_tests.cpp)
-target_link_libraries(unit_tests PRIVATE presentation application)
+target_link_libraries(unit_tests PRIVATE presentation application infrastructure)
+target_include_directories(unit_tests SYSTEM PRIVATE "${YUBIKEY_INCLUDE_DIR}")
+
+# --- Development tool: generates Yubico OTPs from a known AES key -----------
+# Only for local tests. It is not part of dist/ and is never deployed.
+add_executable(yk-otp-sim tools/yk_otp_sim.cpp)
+target_include_directories(yk-otp-sim SYSTEM PRIVATE "${YUBIKEY_INCLUDE_DIR}")
+target_link_libraries(yk-otp-sim PRIVATE "${YUBIKEY_LIBRARY}")
 add_test(NAME unit_tests COMMAND unit_tests)

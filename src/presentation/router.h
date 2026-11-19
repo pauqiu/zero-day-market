@@ -4,6 +4,7 @@
 #include <functional>
 #include <optional>
 
+#include "application/accounts/register_user.h"
 #include "application/catalog/catalog_item.h"
 #include "application/objects/object_detail.h"
 #include "application/objects/object_history.h"
@@ -16,6 +17,7 @@ struct UseCases {
     std::function<CatalogPage(int requestedPage)> listCatalog;
     std::function<std::optional<ObjectDetail>(int objectID)> getObjectDetail;
     std::function<std::optional<ObjectHistory>(int objectID)> getObjectHistory;
+    std::function<RegistrationResult(RegistrationRequest request)> registerUser;
 };
 
 CgiResponse route(const CgiRequest& request, const UseCases& useCases);

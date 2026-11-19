@@ -1,5 +1,6 @@
 #include "presentation/cgi/cgi_request.h"
 
+#include <cstdio>
 #include <cstdlib>
 
 namespace {
@@ -22,20 +23,62 @@ int hexValue(char c)
 
 CgiRequest CgiRequest::fromEnvironment()
 {
-    return CgiRequest(environment("REQUEST_METHOD"), environment("PATH_INFO"),
-                      environment("SCRIPT_NAME"), environment("QUERY_STRING"));
+    const std::string method = environment("REQUEST_METHOD");
+    std::string body;
+    bool tooLarge = false;
+    if (method == "POST") {
+        // CONTENT_LENGTH comes from the client: validated before reading.
+        const std::string declared = environment("CONTENT_LENGTH");
+        std::size_t length = 0;
+        bool valid = !declared.empty() && declared.size() <= 9;
+        for (const char c : declared) {
+            valid = valid && c >= '0' && c <= '9';
+        }
+        if (valid) {
+            length = static_cast<std::size_t>(std::stoul(declared));
+        }
+        if (!valid || length > kMaxBodyLength) {
+            tooLarge = valid;  // an invalid length leaves the body empty
+        } else {
+            body.resize(length);
+            const std::size_t read = std::fread(body.data(), 1, length, stdin);
+            body.resize(read);
+        }
+    }
+    return CgiRequest(method, environment("PATH_INFO"), environment("SCRIPT_NAME"),
+                      environment("QUERY_STRING"), body, environment("CONTENT_TYPE"),
+                      environment("REMOTE_ADDR"), tooLarge);
 }
 
-CgiRequest::CgiRequest(std::string method, std::string path,
-                       std::string scriptName, std::string queryString)
+CgiRequest::CgiRequest(std::string method, std::string path, std::string scriptName,
+                       std::string queryString, std::string body, std::string contentType,
+                       std::string remoteAddress, bool bodyTooLarge)
     : requestMethod(std::move(method)),
       pathInfo(std::move(path)),
       script(std::move(scriptName)),
-      rawQueryLength(queryString.size())
+      rawQueryLength(queryString.size()),
+      remote(std::move(remoteAddress)),
+      tooLargeBody(bodyTooLarge || body.size() > kMaxBodyLength)
 {
     if (!queryTooLong()) {
         query = parseQueryString(queryString);
     }
+    // "application/x-www-form-urlencoded", optionally followed by "; charset=...".
+    const std::string expected = "application/x-www-form-urlencoded";
+    formEncoded = contentType.compare(0, expected.size(), expected) == 0 &&
+                  (contentType.size() == expected.size() || contentType[expected.size()] == ';');
+    if (formEncoded && !tooLargeBody) {
+        form = parseQueryString(body);
+    }
+}
+
+std::optional<std::string> CgiRequest::formParam(const std::string& name) const
+{
+    const auto found = form.find(name);
+    if (found == form.end()) {
+        return std::nullopt;
+    }
+    return found->second;
 }
 
 std::optional<std::string> CgiRequest::queryParam(const std::string& name) const

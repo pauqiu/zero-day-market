@@ -4,6 +4,7 @@
 #include "presentation/pages/history_page.h"
 #include "presentation/pages/layout.h"
 #include "presentation/pages/object_page.h"
+#include "presentation/pages/register_page.h"
 
 namespace {
 
@@ -92,6 +93,77 @@ CgiResponse handleHistory(const CgiRequest& request, const UseCases& useCases)
     return response;
 }
 
+bool isReadMethod(const std::string& method)
+{
+    return method == "GET" || method == "HEAD";
+}
+
+CgiResponse methodNotAllowed(const CgiRequest& request, const char* allowed)
+{
+    CgiResponse response = errorResponse(405, "Método no permitido",
+                                          "Esta dirección no admite ese tipo de solicitud.",
+                                          request.scriptName());
+    response.headers.emplace_back("Allow", allowed);
+    return response;
+}
+
+// Pages that carry or ask for secrets are never stored by the browser.
+CgiResponse noStore(CgiResponse response)
+{
+    response.headers.emplace_back("Cache-Control", "no-store");
+    return response;
+}
+
+CgiResponse handleRegisterForm(const CgiRequest& request)
+{
+    CgiResponse response;
+    response.body = renderPage("Crear cuenta", renderRegisterBody(request.scriptName(), "", "", {}),
+                               request.scriptName()).str();
+    return noStore(response);
+}
+
+CgiResponse handleRegisterSubmit(const CgiRequest& request, const UseCases& useCases)
+{
+    if (request.bodyTooLarge()) {
+        return errorResponse(413, "Solicitud demasiado grande",
+                             "Los datos enviados exceden el tamaño permitido.", request.scriptName());
+    }
+    if (!request.hasFormBody()) {
+        return errorResponse(415, "Formato no admitido",
+                             "Los datos deben enviarse desde el formulario de registro.",
+                             request.scriptName());
+    }
+
+    RegistrationRequest registration;
+    registration.username = request.formParam("username").value_or("");
+    registration.email = request.formParam("email").value_or("");
+    registration.password = request.formParam("password").value_or("");
+    registration.passwordConfirmation = request.formParam("password_confirmation").value_or("");
+    registration.aesKey = request.formParam("aes_key").value_or("");
+    registration.otp = request.formParam("otp").value_or("");
+    registration.clientIP = request.remoteAddress();
+
+    // Only these two fields may be written back into the form.
+    const std::string username = registration.username;
+    const std::string email = registration.email;
+
+    const RegistrationResult result = useCases.registerUser(std::move(registration));
+
+    CgiResponse response;
+    if (result.success) {
+        response.body = renderPage("Cuenta creada",
+                                   renderRegisterDoneBody(request.scriptName(), result.username),
+                                   request.scriptName()).str();
+    } else {
+        response.status = 422;
+        response.body = renderPage("Crear cuenta",
+                                   renderRegisterBody(request.scriptName(), username, email,
+                                                      result.errors),
+                                   request.scriptName()).str();
+    }
+    return noStore(response);
+}
+
 }  // namespace
 
 CgiResponse errorResponse(int status, const std::string& heading,
@@ -107,15 +179,6 @@ CgiResponse errorResponse(int status, const std::string& heading,
 
 CgiResponse route(const CgiRequest& request, const UseCases& useCases)
 {
-    const std::string& method = request.method();
-    if (method != "GET" && method != "HEAD") {
-        CgiResponse response = errorResponse(405, "Método no permitido",
-                                             "Esta página solo admite consultas.",
-                                             request.scriptName());
-        response.headers.emplace_back("Allow", "GET, HEAD");
-        return response;
-    }
-
     if (request.queryTooLong()) {
         return errorResponse(414, "Dirección demasiado larga",
                              "La dirección solicitada excede el tamaño permitido.",
@@ -123,14 +186,31 @@ CgiResponse route(const CgiRequest& request, const UseCases& useCases)
     }
 
     const std::string& path = request.path();
+    const std::string& method = request.method();
+
+    // Public pages: read-only.
     if (path.empty() || path == "/" || path == "/catalogo") {
-        return handleCatalog(request, useCases);
+        return isReadMethod(method) ? handleCatalog(request, useCases)
+                                    : methodNotAllowed(request, "GET, HEAD");
     }
     if (path == "/objeto") {
-        return handleObject(request, useCases);
+        return isReadMethod(method) ? handleObject(request, useCases)
+                                    : methodNotAllowed(request, "GET, HEAD");
     }
     if (path == "/historial") {
-        return handleHistory(request, useCases);
+        return isReadMethod(method) ? handleHistory(request, useCases)
+                                    : methodNotAllowed(request, "GET, HEAD");
+    }
+
+    // Registration: the form is read with GET; it only changes data with POST (control: row 4).
+    if (path == "/registro") {
+        if (isReadMethod(method)) {
+            return handleRegisterForm(request);
+        }
+        if (method == "POST") {
+            return handleRegisterSubmit(request, useCases);
+        }
+        return methodNotAllowed(request, "GET, HEAD, POST");
     }
 
     return errorResponse(404, "Página no encontrada",

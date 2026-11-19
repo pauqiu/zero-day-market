@@ -9,7 +9,10 @@ const char* reasonPhrase(int status)
         case 400: return "Bad Request";
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
+        case 413: return "Content Too Large";
         case 414: return "URI Too Long";
+        case 415: return "Unsupported Media Type";
+        case 422: return "Unprocessable Content";
         default:  return "Internal Server Error";
     }
 }

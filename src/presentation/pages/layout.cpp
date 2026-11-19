@@ -13,6 +13,7 @@ Html renderPage(const std::string& title, const Html& body, const std::string& s
     context.setText("title", title)
         .setText("commercialName", kCommercialName)
         .setText("homeUrl", scriptName + "/catalogo")
+        .setText("registerUrl", scriptName + "/registro")
         .setHtml("body", body);
     return renderNamedTemplate("layout", context);
 }

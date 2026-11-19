@@ -93,3 +93,82 @@ std::optional<std::string> MariaDbStatement::fetchString(unsigned int column, un
     }
     return value;
 }
+
+MariaDbParams& MariaDbParams::text(std::string_view value)
+{
+    buffers.emplace_back(value);
+    lengths.push_back(static_cast<unsigned long>(value.size()));
+    MYSQL_BIND bind{};
+    bind.buffer_type = MYSQL_TYPE_STRING;
+    bind.buffer = buffers.back().data();
+    bind.buffer_length = lengths.back();
+    bind.length = &lengths.back();
+    binds.push_back(bind);
+    return *this;
+}
+
+MariaDbParams& MariaDbParams::blob(const std::vector<unsigned char>& value)
+{
+    buffers.emplace_back(value.begin(), value.end());
+    lengths.push_back(static_cast<unsigned long>(value.size()));
+    MYSQL_BIND bind{};
+    bind.buffer_type = MYSQL_TYPE_BLOB;
+    bind.buffer = buffers.back().data();
+    bind.buffer_length = lengths.back();
+    bind.length = &lengths.back();
+    binds.push_back(bind);
+    return *this;
+}
+
+MariaDbParams& MariaDbParams::integer(long long value)
+{
+    integers.push_back(value);
+    MYSQL_BIND bind{};
+    bind.buffer_type = MYSQL_TYPE_LONGLONG;
+    bind.buffer = &integers.back();
+    binds.push_back(bind);
+    return *this;
+}
+
+MariaDbParams& MariaDbParams::null()
+{
+    MYSQL_BIND bind{};
+    bind.buffer_type = MYSQL_TYPE_NULL;
+    bind.is_null = &isNull;
+    binds.push_back(bind);
+    return *this;
+}
+
+bool MariaDbParams::execute(MariaDbStatement& statement)
+{
+    if (mysql_stmt_param_count(statement.handle()) != binds.size()) {
+        throw DatabaseError("statement parameter count does not match");
+    }
+    if (!binds.empty() && mysql_stmt_bind_param(statement.handle(), binds.data()) != 0) {
+        statement.fail("bind_param");
+    }
+    return mysql_stmt_execute(statement.handle()) == 0;
+}
+
+MariaDbTransaction::MariaDbTransaction(MariaDbConnection& connection) : mysql(connection.handle())
+{
+    if (mysql_autocommit(mysql, 0) != 0) {
+        throw DatabaseError(std::string("cannot start transaction: ") + mysql_error(mysql));
+    }
+}
+
+MariaDbTransaction::~MariaDbTransaction()
+{
+    if (!finished) {
+        mysql_rollback(mysql);
+    }
+    mysql_autocommit(mysql, 1);
+}
+
+void MariaDbTransaction::commit()
+{
+    if (mysql_commit(mysql) != 0) {
+        throw DatabaseError(std::string("commit failed: ") + mysql_error(mysql));
+    }
+    finished = true;
+}

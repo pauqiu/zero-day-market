@@ -1,14 +1,23 @@
 // Unit tests with plain CTest (no third-party framework).
 // Run: ctest --test-dir build --output-on-failure
 
+#include <yubikey.h>
+
+#include <array>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <vector>
 
+#include "application/accounts/register_user.h"
 #include "application/catalog/list_catalog.h"
 #include "application/objects/get_object_detail.h"
 #include "application/objects/get_object_history.h"
 #include "domain/objects/transfer_rules.h"
+#include "domain/users/account_rules.h"
+#include "infrastructure/crypto/aes_gcm_secret_box.h"
+#include "infrastructure/crypto/scrypt_password_hasher.h"
+#include "infrastructure/yubikey/libyubikey_otp_decoder.h"
 #include "presentation/cgi/cgi_request.h"
 #include "presentation/pages/catalog_page.h"
 #include "presentation/pages/formatting.h"
@@ -351,6 +360,336 @@ void testHistoryPage()
     CHECK(html2.find("<table>") == std::string::npos);
 }
 
+// ---------------------------------------------------------------- accounts
+
+const std::string kTestAesKey = "00112233445566778899aabbccddeeff";
+const std::string kTestPublicID = "cccccbcdefgh";
+
+// An OTP as the YubiKey with that AES key would type it.
+std::string makeOtp(const std::string& aesKeyHex, const std::string& publicID,
+                    std::uint16_t counter, std::uint8_t sessionUse)
+{
+    char key[YUBIKEY_KEY_SIZE + 1];
+    yubikey_hex_decode(key, aesKeyHex.c_str(), sizeof key);  // size of the destination
+    yubikey_token_st token{};
+    const unsigned char uid[YUBIKEY_UID_SIZE] = {0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+    std::memcpy(token.uid, uid, sizeof uid);
+    token.ctr = counter;
+    token.use = sessionUse;
+    token.rnd = 0x4242;
+    // A YubiKey stores the complement of the CRC-16 of the first 14 bytes;
+    // yubikey_generate does not compute it, so it is set here.
+    token.crc = static_cast<std::uint16_t>(
+        ~yubikey_crc16(reinterpret_cast<const std::uint8_t*>(&token), YUBIKEY_BLOCK_SIZE - 2));
+    char block[2 * YUBIKEY_BLOCK_SIZE + 1];
+    yubikey_generate(&token, reinterpret_cast<const std::uint8_t*>(key), block);
+    return publicID + block;
+}
+
+void testAccountRules()
+{
+    CHECK(isValidUsername("ana_maria-2"));
+    CHECK(!isValidUsername("ab"));
+    CHECK(!isValidUsername(std::string(33, 'a')));
+    CHECK(!isValidUsername("ana maria"));
+    CHECK(!isValidUsername("ana<b>"));
+    CHECK(!isValidUsername("ana\nBcc"));
+
+    CHECK(normalizeEmail("Ana.Perez@NAC.UCR.ac.cr") == std::optional<std::string>("ana.perez@nac.ucr.ac.cr"));
+    CHECK(!normalizeEmail("ana@localhost"));             // needs a dot in the domain
+    CHECK(!normalizeEmail("ana@@b.com"));
+    CHECK(!normalizeEmail("a b@c.com"));
+    CHECK(!normalizeEmail("ana@b.com\r\nBcc: x@y.com"));  // header injection
+    CHECK(!normalizeEmail(".ana@b.com"));
+    CHECK(!normalizeEmail("ana..p@b.com"));
+    CHECK(!normalizeEmail("ana@-b.com"));
+    CHECK(!normalizeEmail("\"ana\"@b.com"));
+
+    CHECK(checkPasswordPolicy("Corta1!") == PasswordProblem::TooShort);
+    CHECK(checkPasswordPolicy("solominusculas") == PasswordProblem::TooFewCharacterTypes);
+    CHECK(checkPasswordPolicy("minusculasymas123") == PasswordProblem::TooFewCharacterTypes);
+    CHECK(checkPasswordPolicy("Minusculas y 123") == PasswordProblem::None);
+    CHECK(checkPasswordPolicy(std::string(129, 'a') + "A1") == PasswordProblem::TooLong);
+}
+
+void testScrypt()
+{
+    ScryptPasswordHasher hasher(ScryptPasswordHasher::Parameters{10, 8, 1});  // cheap for tests
+    const std::string stored = hasher.hash("Contraseña segura 1");
+    CHECK(stored.rfind("scrypt$10$8$1$", 0) == 0);
+    CHECK(stored.find("Contraseña") == std::string::npos);
+    CHECK(hasher.verify("Contraseña segura 1", stored));
+    CHECK(!hasher.verify("Contraseña segura 2", stored));
+    CHECK(hasher.hash("Contraseña segura 1") != stored);  // a new salt every time
+
+    std::string tampered = stored;
+    tampered.back() = tampered.back() == '0' ? '1' : '0';
+    CHECK(!hasher.verify("Contraseña segura 1", tampered));
+    // Parameters outside the accepted range are refused without computing.
+    CHECK(!hasher.verify("x", "scrypt$30$8$1$" + std::string(32, 'a') + "$" + std::string(64, 'b')));
+    CHECK(!hasher.verify("x", "md5$abc"));
+    ScryptPasswordHasher production;  // the real parameters are valid
+}
+
+void testSecretBox()
+{
+    std::array<unsigned char, 32> key{};
+    key.fill(7);
+    AesGcmSecretBox box = AesGcmSecretBox::fromKey(key);
+    const std::vector<unsigned char> secret = {1, 2, 3, 4, 5, 6};
+
+    const auto sealed = box.seal(secret, "yubikey-private-id:cccccbcdefgh");
+    CHECK(sealed.size() == 1 + 12 + secret.size() + 16);
+    CHECK(box.open(sealed, "yubikey-private-id:cccccbcdefgh") == std::optional(secret));
+    CHECK(!box.open(sealed, "yubikey-aes-key:cccccbcdefgh"));      // other column
+    CHECK(!box.open(sealed, "yubikey-private-id:cccccbcdefgi"));   // other row
+    CHECK(box.seal(secret, "c") != box.seal(secret, "c"));          // random nonce
+
+    auto altered = sealed;
+    altered[14] ^= 0x01;
+    CHECK(!box.open(altered, "yubikey-private-id:cccccbcdefgh"));
+    CHECK(!box.open(std::vector<unsigned char>(sealed.begin(), sealed.begin() + 20), "c"));
+
+    key.fill(8);
+    AesGcmSecretBox other = AesGcmSecretBox::fromKey(key);
+    CHECK(!other.open(sealed, "yubikey-private-id:cccccbcdefgh"));  // another master key
+}
+
+void testOtpDecoder()
+{
+    LibyubikeyOtpDecoder decoder;
+    const std::string otp = makeOtp(kTestAesKey, kTestPublicID, 5, 3);
+    CHECK(otp.size() == 44);
+
+    const auto decoded = decoder.decode(otp, kTestAesKey);
+    CHECK(decoded.has_value());
+    CHECK(decoded && decoded->publicID == kTestPublicID);
+    CHECK(decoded && decoded->counter == 5 && decoded->sessionUse == 3);
+    CHECK(decoded && decoded->privateID == std::vector<unsigned char>({0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f}));
+
+    CHECK(!decoder.decode(otp, "ffeeddccbbaa99887766554433221100"));  // wrong AES key
+    std::string altered = otp;
+    altered[20] = altered[20] == 'c' ? 'd' : 'c';
+    CHECK(!decoder.decode(altered, kTestAesKey));                       // altered block
+    CHECK(!decoder.decode(otp.substr(0, 43), kTestAesKey));             // wrong length
+    CHECK(!decoder.decode(otp + "c", kTestAesKey));
+    CHECK(!decoder.decode(std::string(44, 'a'), kTestAesKey));          // not modhex
+    CHECK(!decoder.decode(otp, "zz112233445566778899aabbccddeeff"));    // not hex
+}
+
+class FakeAccounts : public AccountRepository {
+    public:
+        CreateAccountOutcome outcome = CreateAccountOutcome::Created;
+        std::vector<NewAccount> created;
+        std::vector<std::string> incidents;
+
+        CreateAccountResult createAccount(const NewAccount& account) override
+        {
+            created.push_back(account);
+            return {outcome, outcome == CreateAccountOutcome::Created ? 41 : 0};
+        }
+
+        void recordIncident(std::string_view category, std::string_view, std::string_view ip,
+                            std::string_view details) override
+        {
+            incidents.push_back(std::string(category) + "|" + std::string(ip) + "|" +
+                                std::string(details));
+        }
+};
+
+class FakeHasher : public PasswordHasher {
+    public:
+        std::string hash(std::string_view) override { return "scrypt$fake"; }
+        bool verify(std::string_view, std::string_view) override { return false; }
+};
+
+class FakeBox : public SecretBox {
+    public:
+        std::vector<std::string> contexts;
+
+        std::vector<unsigned char> seal(const std::vector<unsigned char>& plaintext,
+                                        std::string_view context) override
+        {
+            contexts.emplace_back(context);
+            std::vector<unsigned char> out(plaintext.size(), 0xEE);  // never the plaintext
+            return out;
+        }
+
+        std::optional<std::vector<unsigned char>> open(const std::vector<unsigned char>&,
+                                                       std::string_view) override
+        {
+            return std::nullopt;
+        }
+};
+
+RegistrationRequest validRegistration()
+{
+    RegistrationRequest r;
+    r.username = "colombina";
+    r.email = "Colombina@NAC.UCR.ac.cr";
+    r.password = "Mascara bicolor 2026";
+    r.passwordConfirmation = r.password;
+    r.aesKey = "00112233445566778899AABBCCDDEEFF";  // uppercase is accepted
+    r.otp = makeOtp(kTestAesKey, kTestPublicID, 9, 2);
+    r.clientIP = "172.24.0.15";
+    return r;
+}
+
+bool hasError(const RegistrationResult& result, RegistrationError error)
+{
+    for (const RegistrationError e : result.errors) {
+        if (e == error) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void testRegisterUser()
+{
+    FakeAccounts accounts;
+    FakeHasher hasher;
+    FakeBox box;
+    LibyubikeyOtpDecoder decoder;
+    RegisterUser registerUser(accounts, hasher, box, decoder);
+
+    // Success: secrets reach storage only protected.
+    RegistrationResult ok = registerUser.execute(validRegistration());
+    CHECK(ok.success && ok.userID == 41 && ok.username == "colombina");
+    CHECK(accounts.created.size() == 1);
+    const NewAccount& account = accounts.created.front();
+    CHECK(account.email == "colombina@nac.ucr.ac.cr");
+    CHECK(account.passwordHash == "scrypt$fake");
+    CHECK(account.publicID == kTestPublicID);
+    CHECK(account.counter == 9 && account.sessionUse == 2);
+    CHECK(account.aesKeySealed == std::vector<unsigned char>(16, 0xEE));
+    CHECK(account.privateIDSealed == std::vector<unsigned char>(6, 0xEE));
+    CHECK(box.contexts.size() == 2 && box.contexts[0] == "yubikey-aes-key:" + kTestPublicID &&
+          box.contexts[1] == "yubikey-private-id:" + kTestPublicID);
+    CHECK(account.clientIP == "172.24.0.15");
+    CHECK(accounts.incidents.empty());
+
+    // Format errors are all reported at once, and nothing is stored.
+    accounts.created.clear();
+    RegistrationRequest bad;
+    bad.username = "a b";
+    bad.email = "nope";
+    bad.password = "short";
+    bad.passwordConfirmation = "other";
+    bad.aesKey = "123";
+    bad.otp = "xyz";
+    RegistrationResult invalid = registerUser.execute(bad);
+    CHECK(!invalid.success && invalid.errors.size() == 6);
+    CHECK(hasError(invalid, RegistrationError::InvalidUsername) &&
+          hasError(invalid, RegistrationError::InvalidEmail) &&
+          hasError(invalid, RegistrationError::PasswordTooShort) &&
+          hasError(invalid, RegistrationError::PasswordMismatch) &&
+          hasError(invalid, RegistrationError::InvalidAesKeyFormat) &&
+          hasError(invalid, RegistrationError::InvalidOtpFormat));
+    CHECK(accounts.created.empty() && accounts.incidents.empty());
+
+    // A wrong AES key: generic rejection, an incident, nothing stored.
+    RegistrationRequest wrongKey = validRegistration();
+    wrongKey.aesKey = "ffeeddccbbaa99887766554433221100";
+    RegistrationResult rejected = registerUser.execute(wrongKey);
+    CHECK(!rejected.success && hasError(rejected, RegistrationError::YubikeyRejected));
+    CHECK(accounts.created.empty());
+    CHECK(accounts.incidents.size() == 1 &&
+          accounts.incidents[0] == "validacion|172.24.0.15|public_id=" + kTestPublicID);
+
+    // Duplicates detected by the database.
+    accounts.outcome = CreateAccountOutcome::UsernameTaken;
+    CHECK(hasError(registerUser.execute(validRegistration()), RegistrationError::UsernameTaken));
+    accounts.outcome = CreateAccountOutcome::EmailTaken;
+    CHECK(hasError(registerUser.execute(validRegistration()), RegistrationError::EmailTaken));
+    accounts.outcome = CreateAccountOutcome::YubikeyTaken;
+    accounts.incidents.clear();
+    CHECK(hasError(registerUser.execute(validRegistration()), RegistrationError::YubikeyRejected));
+    CHECK(accounts.incidents.size() == 1);
+}
+
+void testFormRequests()
+{
+    CgiRequest form("POST", "/registro", "/app.cgi", "", "username=ana&otp=abc%2Bd&x=1",
+                    "application/x-www-form-urlencoded; charset=UTF-8", "10.0.0.1");
+    CHECK(form.hasFormBody() && !form.bodyTooLarge());
+    CHECK(form.formParam("username") == std::optional<std::string>("ana"));
+    CHECK(form.formParam("otp") == std::optional<std::string>("abc+d"));
+    CHECK(!form.formParam("password"));
+    CHECK(form.remoteAddress() == "10.0.0.1");
+
+    CgiRequest json("POST", "/registro", "/app.cgi", "", "username=ana", "application/json");
+    CHECK(!json.hasFormBody() && !json.formParam("username"));
+    CgiRequest prefix("POST", "/registro", "/app.cgi", "", "username=ana",
+                      "application/x-www-form-urlencodedXYZ");
+    CHECK(!prefix.hasFormBody());
+
+    CgiRequest big("POST", "/registro", "/app.cgi", "", std::string(CgiRequest::kMaxBodyLength + 1, 'a'),
+                   "application/x-www-form-urlencoded");
+    CHECK(big.bodyTooLarge() && !big.formParam("a"));
+}
+
+bool hasHeader(const CgiResponse& response, const std::string& name, const std::string& value)
+{
+    for (const auto& [n, v] : response.headers) {
+        if (n == name && v == value) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void testRegistrationRoutes()
+{
+    UseCases useCases;
+    RegistrationRequest received;
+    bool succeed = false;
+    useCases.registerUser = [&](RegistrationRequest request) {
+        received = request;
+        RegistrationResult result;
+        if (succeed) {
+            result.success = true;
+            result.username = request.username;
+        } else {
+            result.errors = {RegistrationError::YubikeyRejected};
+        }
+        return result;
+    };
+
+    const CgiResponse formPage = route(CgiRequest("GET", "/registro", "/app.cgi", ""), useCases);
+    CHECK(formPage.status == 200 && hasHeader(formPage, "Cache-Control", "no-store"));
+    CHECK(formPage.body.find("method=\"post\"") != std::string::npos);
+
+    const std::string body =
+        "username=%3Cb%3Eana&email=ana%40b.com&password=Secreta+12345&password_confirmation=Secreta+12345"
+        "&aes_key=00112233445566778899aabbccddeeff&otp=cccccbcdefghtest";
+    const std::string formType = "application/x-www-form-urlencoded";
+
+    const CgiResponse failed =
+        route(CgiRequest("POST", "/registro", "/app.cgi", "", body, formType, "10.1.1.1"), useCases);
+    CHECK(received.username == "<b>ana" && received.password == "Secreta 12345" &&
+          received.aesKey == "00112233445566778899aabbccddeeff" && received.clientIP == "10.1.1.1");
+    CHECK(failed.status == 422 && hasHeader(failed, "Cache-Control", "no-store"));
+    CHECK(failed.body.find("&lt;b&gt;ana") != std::string::npos);        // username escaped
+    CHECK(failed.body.find("ana@b.com") != std::string::npos);           // email written back
+    CHECK(failed.body.find("Secreta") == std::string::npos);             // never the password
+    CHECK(failed.body.find("00112233445566778899aabbccddeeff") == std::string::npos);
+    CHECK(failed.body.find("cccccbcdefghtest") == std::string::npos);
+    CHECK(failed.body.find("no se puede registrar") != std::string::npos);
+
+    succeed = true;
+    const CgiResponse done =
+        route(CgiRequest("POST", "/registro", "/app.cgi", "", body, formType, "10.1.1.1"), useCases);
+    CHECK(done.status == 200 && done.body.find("Cuenta creada") != std::string::npos);
+
+    CHECK(route(CgiRequest("PUT", "/registro", "/app.cgi", ""), useCases).status == 405);
+    CHECK(route(CgiRequest("POST", "/registro", "/app.cgi", "", "{}", "application/json"), useCases)
+              .status == 415);
+    CHECK(route(CgiRequest("POST", "/registro", "/app.cgi", "", "", formType, "", true), useCases)
+              .status == 413);
+    CHECK(route(CgiRequest("POST", "/catalogo", "/app.cgi", "", body, formType), useCases).status == 405);
+}
+
 void testRouter()
 {
     UseCases useCases;
@@ -420,6 +759,13 @@ int main()
     testObjectPage();
     testGetObjectHistory();
     testHistoryPage();
+    testAccountRules();
+    testScrypt();
+    testSecretBox();
+    testOtpDecoder();
+    testRegisterUser();
+    testFormRequests();
+    testRegistrationRoutes();
     testTemplateEngine();
     testEmbeddedTemplatesRender();
     testRouter();

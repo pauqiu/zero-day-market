@@ -3,8 +3,11 @@
 
 #include <mysql.h>
 
+#include <deque>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "infrastructure/db/db_config.h"
 
@@ -42,8 +45,50 @@ class MariaDbStatement {
         std::optional<std::string> fetchString(unsigned int column, unsigned long length,
                                                my_bool isNull);
 
+        // Server error of the last failed call (for example 1062, duplicate key).
+        unsigned int errorNumber() { return mysql_stmt_errno(stmt); }
+        std::string errorMessage() { return mysql_stmt_error(stmt); }
+
     private:
         MYSQL_STMT* stmt = nullptr;
+};
+
+// Parameters for a prepared statement. Keeps a copy of every value, so the
+// buffers stay valid until the statement runs. Values never become SQL text.
+class MariaDbParams {
+    public:
+        MariaDbParams& text(std::string_view value);
+        MariaDbParams& blob(const std::vector<unsigned char>& value);
+        MariaDbParams& integer(long long value);
+        MariaDbParams& null();
+
+        // Binds the parameters and executes. Returns false if the server
+        // rejected the statement (the error is then in the statement).
+        bool execute(MariaDbStatement& statement);
+
+    private:
+        std::deque<std::string> buffers;
+        std::deque<long long> integers;
+        std::deque<unsigned long> lengths;
+        std::vector<MYSQL_BIND> binds;
+        my_bool isNull = 1;
+};
+
+// A transaction on the connection. If it is not committed (an error or an
+// early return), the destructor rolls it back: all changes or none.
+class MariaDbTransaction {
+    public:
+        explicit MariaDbTransaction(MariaDbConnection& connection);
+        ~MariaDbTransaction();
+
+        MariaDbTransaction(const MariaDbTransaction&) = delete;
+        MariaDbTransaction& operator=(const MariaDbTransaction&) = delete;
+
+        void commit();
+
+    private:
+        MYSQL* mysql;
+        bool finished = false;
 };
 
 #endif // MARIADB_CONNECTION_H

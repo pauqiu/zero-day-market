@@ -4,7 +4,7 @@
 # paths for the application configuration, and Apache running app.cgi.
 #
 #   sudo apt install build-essential cmake pkg-config libmariadb-dev \
-#                    mariadb-server apache2 openssl
+#                    mariadb-server apache2 openssl libssl-dev libyubikey-dev
 #   ./scripts/dev-setup.sh            # set up (keeps existing data)
 #   ./scripts/dev-setup.sh --reset    # drop the local database and start over
 #
@@ -75,6 +75,14 @@ ssl_ca = $CONF_DIR/mariadb-ca.crt
 CONF
 sudo chown root:www-data "$CONF_DIR/db.conf"
 sudo chmod 0640 "$CONF_DIR/db.conf"
+
+# Master key that seals the YubiKey secrets. Created once; never replaced,
+# because the sealed keys in the database could no longer be opened.
+if [ ! -f "$CONF_DIR/yubikey-master.key" ]; then
+    openssl rand -hex 32 | sudo tee "$CONF_DIR/yubikey-master.key" > /dev/null
+fi
+sudo chown root:www-data "$CONF_DIR/yubikey-master.key"
+sudo chmod 0640 "$CONF_DIR/yubikey-master.key"
 
 step "Apache: CGI module and site"
 sudo install -d -m 0755 "$WEB_ROOT/static"

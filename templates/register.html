@@ -1,0 +1,50 @@
+{{! Account registration (HU-06) with the YubiKey (HU-10).
+    Password, AES key and OTP are never written back into the form. }}
+<h1>Crear una cuenta</h1>
+<p class="lead">Para registrarte necesitas tu YubiKey y su llave AES de 32 caracteres hexadecimales.</p>
+
+{{#hasErrors}}
+<div class="errors" role="alert">
+  <p>Revisa los siguientes datos:</p>
+  <ul>
+    {{#errors}}
+    <li>{{message}}</li>
+    {{/errors}}
+  </ul>
+</div>
+{{/hasErrors}}
+
+<form class="form" method="post" action="{{formAction}}">
+  <label for="username">Nombre de usuario</label>
+  <input id="username" name="username" type="text" value="{{username}}" required
+         minlength="3" maxlength="32" pattern="[A-Za-z0-9_\-]+" autocomplete="username">
+  <p class="hint">De 3 a 32 caracteres: letras, números, guion y guion bajo.</p>
+
+  <label for="email">Correo electrónico</label>
+  <input id="email" name="email" type="email" value="{{email}}" required maxlength="254"
+         autocomplete="email">
+
+  <label for="password">Contraseña</label>
+  <input id="password" name="password" type="password" required minlength="12" maxlength="128"
+         autocomplete="new-password">
+  <p class="hint">Al menos 12 caracteres y 3 de estos tipos: minúsculas, mayúsculas, números y otros símbolos.</p>
+
+  <label for="password_confirmation">Confirma la contraseña</label>
+  <input id="password_confirmation" name="password_confirmation" type="password" required
+         minlength="12" maxlength="128" autocomplete="new-password">
+
+  <fieldset>
+    <legend>YubiKey</legend>
+    <label for="aes_key">Llave AES</label>
+    <input id="aes_key" name="aes_key" type="password" required minlength="32" maxlength="32"
+           pattern="[0-9a-fA-F]{32}" autocomplete="off" spellcheck="false">
+    <p class="hint">32 caracteres hexadecimales. Si la escribes mal, la YubiKey no se podrá registrar.</p>
+
+    <label for="otp">Código de la YubiKey</label>
+    <input id="otp" name="otp" type="text" required minlength="44" maxlength="44"
+           autocomplete="off" spellcheck="false">
+    <p class="hint">Haz clic en este campo y toca tu YubiKey.</p>
+  </fieldset>
+
+  <button type="submit">Crear cuenta</button>
+</form>

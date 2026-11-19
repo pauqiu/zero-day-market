@@ -30,7 +30,9 @@ mkdir -p "$DIST"
     -v "$REPO":/src:ro -v "$DIST":/out "$IMAGE" bash -euo pipefail -c '
     dnf -y -q install dnf-plugins-core > /dev/null
     dnf config-manager --set-enabled crb
-    dnf -y -q install gcc-c++ make cmake pkgconf-pkg-config mariadb-connector-c-devel > /dev/null
+    dnf -y -q install epel-release > /dev/null
+    dnf -y -q install gcc-c++ make cmake pkgconf-pkg-config mariadb-connector-c-devel \
+        openssl-devel libyubikey-devel > /dev/null
     cmake -S /src -B /tmp/build -DCMAKE_BUILD_TYPE=Release -DJC_WERROR="$JC_WERROR" > /dev/null
     cmake --build /tmp/build -j"$(nproc)"
     ctest --test-dir /tmp/build --output-on-failure

@@ -6,6 +6,8 @@
 #   * /etc/pki/tls/certs/jesterschest.crt   certificate from the course CA
 #   * /etc/pki/tls/private/jesterschest.key the key generated with the CSR
 #   * /etc/jesterschest/mariadb-ca.crt      certificate of VMDatos
+#   * libyubikey from EPEL (see the installation document):
+#       sudo dnf install epel-release && sudo dnf install libyubikey
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -28,6 +30,7 @@ cert_key=$(openssl x509 -in /etc/pki/tls/certs/jesterschest.crt -noout -pubkey |
 key_key=$(openssl pkey -in /etc/pki/tls/private/jesterschest.key -pubout | sha256sum)
 [ "$cert_key" = "$key_key" ] || { echo "error: the certificate does not match the private key" >&2; exit 1; }
 dnf -y -q install mariadb-connector-c > /dev/null
+rpm -q libyubikey > /dev/null || { echo "error: install libyubikey from EPEL first" >&2; exit 1; }
 
 step "Installing app.cgi and static files"
 install -m 0755 -o root -g root "$HERE/app.cgi" /var/www/cgi-bin/app.cgi
@@ -52,6 +55,15 @@ CONF
 fi
 chown root:apache "$CONF_DIR/db.conf" && chmod 0640 "$CONF_DIR/db.conf"
 chown root:root "$CONF_DIR/mariadb-ca.crt" && chmod 0644 "$CONF_DIR/mariadb-ca.crt"
+
+# Master key that seals the YubiKey secrets (AES-256-GCM). Created once and
+# never replaced: the sealed keys in the database depend on it. Back it up
+# OUTSIDE VMDatos (with the database backups it would defeat its purpose).
+if [ ! -f "$CONF_DIR/yubikey-master.key" ]; then
+    (umask 077 && openssl rand -hex 32 > "$CONF_DIR/yubikey-master.key")
+    echo "Created $CONF_DIR/yubikey-master.key: back it up now, outside VMDatos."
+fi
+chown root:apache "$CONF_DIR/yubikey-master.key" && chmod 0640 "$CONF_DIR/yubikey-master.key"
 restorecon -R "$CONF_DIR"
 
 step "SELinux: CGI execution and database connections"
