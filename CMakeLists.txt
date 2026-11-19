@@ -39,12 +39,14 @@ add_library(domain STATIC
   src/domain/users/user.cpp
   src/domain/objects/object.cpp
   src/domain/locals/local.cpp
+  src/domain/objects/transfer_rules.cpp
 )
 target_include_directories(domain PUBLIC src)
 
 # --- Application: use cases and the ports they need -------------------------
 add_library(application STATIC
   src/application/catalog/list_catalog.cpp
+  src/application/objects/get_object_detail.cpp
 )
 target_link_libraries(application PUBLIC domain)
 
@@ -53,6 +55,7 @@ add_library(infrastructure STATIC
   src/infrastructure/db/db_config.cpp
   src/infrastructure/db/mariadb_connection.cpp
   src/infrastructure/db/mariadb_catalog_repository.cpp
+  src/infrastructure/db/mariadb_object_detail_repository.cpp
 )
 target_link_libraries(infrastructure PUBLIC application PkgConfig::MARIADB)
 
@@ -78,6 +81,8 @@ add_library(presentation STATIC
   src/presentation/pages/html.cpp
   src/presentation/pages/layout.cpp
   src/presentation/pages/catalog_page.cpp
+  src/presentation/pages/formatting.cpp
+  src/presentation/pages/object_page.cpp
   src/presentation/router.cpp
 )
 target_link_libraries(presentation PUBLIC application)

@@ -3,6 +3,9 @@
 
 #include <mysql.h>
 
+#include <optional>
+#include <string>
+
 #include "infrastructure/db/db_config.h"
 
 // Owns one connection for the life of the CGI process (one request).
@@ -33,6 +36,11 @@ class MariaDbStatement {
 
         // Throws DatabaseError with the statement's last error.
         [[noreturn]] void fail(const char* what);
+
+        // Reads a string column after mysql_stmt_fetch, when it was bound with
+        // a zero-size buffer to learn its length first. Empty if SQL NULL.
+        std::optional<std::string> fetchString(unsigned int column, unsigned long length,
+                                               my_bool isNull);
 
     private:
         MYSQL_STMT* stmt = nullptr;

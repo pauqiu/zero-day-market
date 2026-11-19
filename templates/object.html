@@ -1,0 +1,47 @@
+{{! Object detail (HU-02). }}
+<p class="breadcrumb"><a href="{{catalogUrl}}">Catálogo</a></p>
+<h1>{{name}}</h1>
+<p class="object-id">Objeto #{{id}}</p>
+
+<p class="description">{{description}}</p>
+
+<dl class="facts">
+  <dt>Propietario</dt>
+  {{#hasOwner}}<dd>{{owner}}</dd>{{/hasOwner}}{{^hasOwner}}<dd class="unowned">Inventario del mercado</dd>{{/hasOwner}}
+  <dt>Última transferencia</dt>
+  {{#transferred}}<dd>{{lastTransfer}}</dd>{{/transferred}}{{^transferred}}<dd class="muted">Nunca ha sido transferido</dd>{{/transferred}}
+  <dt>Disponibilidad</dt>
+  <dd>{{#available}}<span class="status available">Disponible para intercambio</span>{{/available}}{{#blocked}}<span class="status blocked">Bloqueado hasta el {{blockedUntil}}</span>{{/blocked}}{{#inventory}}<span class="status inventory">Se asigna a nuevos usuarios</span>{{/inventory}}</dd>
+</dl>
+<p class="note">Horas en tiempo de Costa Rica.</p>
+
+<h2>Documentos</h2>
+{{^documents}}
+<p class="muted">Este objeto no tiene documentos adjuntos.</p>
+{{/documents}}
+{{#hasDocuments}}
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th scope="col">Documento</th>
+        <th scope="col">Tipo</th>
+        <th scope="col">Tamaño</th>
+        <th scope="col">Fecha de carga</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{#documents}}
+      <tr>
+        <td>{{documentName}}</td>
+        <td>{{documentType}}</td>
+        <td>{{documentSize}}</td>
+        <td>{{uploadedAt}}</td>
+      </tr>
+      {{/documents}}
+    </tbody>
+  </table>
+</div>
+{{/hasDocuments}}
+
+<p class="history-link"><a href="{{historyUrl}}">Ver historial de transferencias</a></p>

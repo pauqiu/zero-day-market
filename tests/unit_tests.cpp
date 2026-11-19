@@ -6,9 +6,13 @@
 #include <vector>
 
 #include "application/catalog/list_catalog.h"
+#include "application/objects/get_object_detail.h"
+#include "domain/objects/transfer_rules.h"
 #include "presentation/cgi/cgi_request.h"
 #include "presentation/pages/catalog_page.h"
+#include "presentation/pages/formatting.h"
 #include "presentation/pages/html.h"
+#include "presentation/pages/object_page.h"
 #include "presentation/router.h"
 #include "presentation/templates/template_engine.h"
 
@@ -190,6 +194,95 @@ void testEmbeddedTemplatesRender()
     CHECK(renderCatalogBody(one, "/app.cgi").str().find("1 objeto en") != std::string::npos);
 }
 
+class FakeObjectDetailRepository : public ObjectDetailRepository {
+    public:
+        std::optional<ObjectRecord> object;
+        std::vector<DocumentSummary> documents;
+        int documentQueries = 0;
+
+        std::optional<ObjectRecord> findObject(int) override { return object; }
+
+        std::vector<DocumentSummary> listDocuments(int) override
+        {
+            ++documentQueries;
+            return documents;
+        }
+};
+
+void testTransferRule()
+{
+    const std::int64_t t = 1'800'000'000;
+    CHECK(!transferBlockedUntil(std::nullopt, t));                     // never transferred
+    CHECK(transferBlockedUntil(t, t) == std::optional<std::int64_t>(t + 1800));
+    CHECK(transferBlockedUntil(t, t + 1799) == std::optional<std::int64_t>(t + 1800));
+    CHECK(!transferBlockedUntil(t, t + 1800));                          // exactly 30 minutes
+    CHECK(!transferBlockedUntil(t, t + 5000));
+}
+
+void testGetObjectDetail()
+{
+    const std::int64_t now = 1'800'000'000;
+    FakeObjectDetailRepository repository;
+    GetObjectDetail getDetail(repository, [now] { return now; });
+
+    CHECK(!getDetail.execute(1));                    // not found
+    CHECK(repository.documentQueries == 0);          // no document query if missing
+
+    repository.object = ObjectRecord{1, "Atlas", "d", std::nullopt, std::nullopt};
+    CHECK(getDetail.execute(1)->availability == Availability::InitialInventory);
+
+    repository.object->ownerUsername = "ana";
+    CHECK(getDetail.execute(1)->availability == Availability::Available);
+
+    repository.object->lastTransferAt = now - 600;   // 10 minutes ago
+    auto detail = getDetail.execute(1);
+    CHECK(detail->availability == Availability::Blocked);
+    CHECK(detail->blockedUntil == std::optional<std::int64_t>(now + 1200));
+
+    repository.object->lastTransferAt = now - 1800;  // 30 minutes ago
+    CHECK(getDetail.execute(1)->availability == Availability::Available);
+}
+
+void testFormatting()
+{
+    // 2026-11-19 20:35 UTC is 14:35 in Costa Rica (UTC-6).
+    CHECK(formatLocalTime(1'795'120'500) == "19/11/2026 14:35");
+    CHECK(formatLocalTime(1'795'060'800) == "18/11/2026 22:00");  // 04:00 UTC: previous day
+    CHECK(formatSize(512) == "512 B");
+    CHECK(formatSize(12'595) == "12.3 KB");
+    CHECK(formatSize(1'258'291) == "1.2 MB");
+    CHECK(documentTypeLabel("application/pdf") == "PDF");
+    CHECK(documentTypeLabel("application/x-msdownload") == "Desconocido");
+}
+
+void testObjectPage()
+{
+    ObjectDetail detail;
+    detail.object = ObjectRecord{7, "<b>Joya</b>", "Una \"joya\" & más", std::string("ana"),
+                                 std::int64_t{1'795'120'500}};
+    detail.availability = Availability::Blocked;
+    detail.blockedUntil = 1'795'122'300;
+    detail.documents.push_back({3, "cert<script>.pdf", "application/pdf", 2048, 1'795'120'500});
+
+    const std::string html = renderObjectBody(detail, "/app.cgi").str();
+    CHECK(html.find("<b>Joya</b>") == std::string::npos);
+    CHECK(html.find("&lt;b&gt;Joya&lt;/b&gt;") != std::string::npos);
+    CHECK(html.find("cert&lt;script&gt;.pdf") != std::string::npos);
+    CHECK(html.find("Bloqueado hasta el 19/11/2026 15:05") != std::string::npos);
+    CHECK(html.find("2.0 KB") != std::string::npos);
+    CHECK(html.find("/app.cgi/historial?id=7") != std::string::npos);
+    CHECK(html.find("<dd>ana</dd>") != std::string::npos);
+
+    ObjectDetail inventory;
+    inventory.object = ObjectRecord{8, "Atlas", "", std::nullopt, std::nullopt};
+    inventory.availability = Availability::InitialInventory;
+    const std::string html2 = renderObjectBody(inventory, "/app.cgi").str();
+    CHECK(html2.find("Inventario del mercado") != std::string::npos);
+    CHECK(html2.find("Nunca ha sido transferido") != std::string::npos);
+    CHECK(html2.find("no tiene documentos") != std::string::npos);
+    CHECK(html2.find("<table>") == std::string::npos);
+}
+
 void testRouter()
 {
     UseCases useCases;
@@ -205,6 +298,27 @@ void testRouter()
     CHECK(route(CgiRequest("POST", "/catalogo", "/app.cgi", ""), useCases).status == 405);
     CHECK(route(CgiRequest("GET", "/nada", "/app.cgi", ""), useCases).status == 404);
     CHECK(route(CgiRequest("GET", "/", "/app.cgi", std::string(3000, 'a')), useCases).status == 414);
+
+    int requestedObject = 0;
+    useCases.getObjectDetail = [&requestedObject](int objectID) -> std::optional<ObjectDetail> {
+        requestedObject = objectID;
+        if (objectID != 5) {
+            return std::nullopt;
+        }
+        ObjectDetail detail;
+        detail.object = ObjectRecord{5, "Atlas", "", std::nullopt, std::nullopt};
+        return detail;
+    };
+    CHECK(route(CgiRequest("GET", "/objeto", "/app.cgi", "id=5"), useCases).status == 200);
+    CHECK(requestedObject == 5);
+    CHECK(route(CgiRequest("GET", "/objeto", "/app.cgi", "id=6"), useCases).status == 404);
+    requestedObject = 0;
+    CHECK(route(CgiRequest("GET", "/objeto", "/app.cgi", ""), useCases).status == 400);
+    CHECK(route(CgiRequest("GET", "/objeto", "/app.cgi", "id=abc"), useCases).status == 400);
+    CHECK(route(CgiRequest("GET", "/objeto", "/app.cgi", "id=5%20OR%201=1"), useCases).status == 400);
+    CHECK(route(CgiRequest("GET", "/objeto", "/app.cgi", "id=0"), useCases).status == 400);
+    CHECK(requestedObject == 0);  // invalid IDs never reach the use case
+    CHECK(route(CgiRequest("POST", "/objeto", "/app.cgi", "id=5"), useCases).status == 405);
 }
 
 }  // namespace
@@ -217,6 +331,10 @@ int main()
     testParsePositiveInt();
     testListCatalogPagination();
     testCatalogPageEscapesData();
+    testTransferRule();
+    testGetObjectDetail();
+    testFormatting();
+    testObjectPage();
     testTemplateEngine();
     testEmbeddedTemplatesRender();
     testRouter();

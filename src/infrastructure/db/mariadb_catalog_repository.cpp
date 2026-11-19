@@ -1,8 +1,5 @@
 #include "infrastructure/db/mariadb_catalog_repository.h"
 
-#include <optional>
-#include <string>
-
 #include "infrastructure/db/database_error.h"
 
 namespace {
@@ -24,26 +21,6 @@ constexpr const char* kListSql =
     "LIMIT ? OFFSET ?";
 
 constexpr unsigned int kListColumns = 4;
-
-// Reads a string column whose size is only known after the fetch.
-std::optional<std::string> fetchString(MariaDbStatement& statement, unsigned int column,
-                                       unsigned long length, my_bool isNull)
-{
-    if (isNull) {
-        return std::nullopt;
-    }
-    std::string value(length, '\0');
-    if (length > 0) {
-        MYSQL_BIND bind{};
-        bind.buffer_type = MYSQL_TYPE_STRING;
-        bind.buffer = value.data();
-        bind.buffer_length = length;
-        if (mysql_stmt_fetch_column(statement.handle(), &bind, column, 0) != 0) {
-            statement.fail("fetch_column");
-        }
-    }
-    return value;
-}
 
 }  // namespace
 
@@ -128,9 +105,9 @@ std::vector<CatalogItem> MariaDbCatalogRepository::listObjects(int limit, long o
 
         CatalogItem item;
         item.objectID = objectID;
-        item.name = fetchString(statement, 1, lengths[1], nulls[1]).value_or("");
-        item.shortDescription = fetchString(statement, 2, lengths[2], nulls[2]).value_or("");
-        item.ownerUsername = fetchString(statement, 3, lengths[3], nulls[3]);
+        item.name = statement.fetchString(1, lengths[1], nulls[1]).value_or("");
+        item.shortDescription = statement.fetchString(2, lengths[2], nulls[2]).value_or("");
+        item.ownerUsername = statement.fetchString(3, lengths[3], nulls[3]);
         items.push_back(std::move(item));
     }
     return items;

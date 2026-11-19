@@ -2,8 +2,10 @@
 #define ROUTER_H
 
 #include <functional>
+#include <optional>
 
 #include "application/catalog/catalog_item.h"
+#include "application/objects/object_detail.h"
 #include "presentation/cgi/cgi_request.h"
 #include "presentation/cgi/cgi_response.h"
 
@@ -11,6 +13,7 @@
 // infrastructure, so presentation never depends on MariaDB directly.
 struct UseCases {
     std::function<CatalogPage(int requestedPage)> listCatalog;
+    std::function<std::optional<ObjectDetail>(int objectID)> getObjectDetail;
 };
 
 CgiResponse route(const CgiRequest& request, const UseCases& useCases);

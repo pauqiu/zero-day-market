@@ -74,3 +74,22 @@ void MariaDbStatement::fail(const char* what)
     throw DatabaseError(std::string("statement ") + what + " failed: " +
                         mysql_stmt_error(stmt));
 }
+
+std::optional<std::string> MariaDbStatement::fetchString(unsigned int column, unsigned long length,
+                                                        my_bool isNull)
+{
+    if (isNull) {
+        return std::nullopt;
+    }
+    std::string value(length, '\0');
+    if (length > 0) {
+        MYSQL_BIND bind{};
+        bind.buffer_type = MYSQL_TYPE_STRING;
+        bind.buffer = value.data();
+        bind.buffer_length = length;
+        if (mysql_stmt_fetch_column(stmt, &bind, column, 0) != 0) {
+            fail("fetch_column");
+        }
+    }
+    return value;
+}
