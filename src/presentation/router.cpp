@@ -1,5 +1,9 @@
 #include "presentation/router.h"
 
+#include <vector>
+
+#include "presentation/cgi/session_cookie.h"
+#include "presentation/pages/auth_pages.h"
 #include "presentation/pages/catalog_page.h"
 #include "presentation/pages/history_page.h"
 #include "presentation/pages/layout.h"
@@ -8,172 +12,345 @@
 
 namespace {
 
-CgiResponse handleCatalog(const CgiRequest& request, const UseCases& useCases)
-{
-    int requestedPage = 1;
-    if (const auto pageParam = request.queryParam("page")) {
-        const auto parsed = parsePositiveInt(*pageParam);
-        if (!parsed) {
-            return errorResponse(400, "Página inválida",
-                                 "El número de página debe ser un entero positivo.",
-                                 request.scriptName());
+// ------------------------------------------------------------ access levels
+
+// What a route requires (control: row 5). Checked here, once, before any
+// handler runs: a handler never has to remember to check it.
+enum class Access {
+    Public,               // anyone
+    PendingSecondFactor,  // password verified, YubiKey still missing
+    Authenticated,        // password AND YubiKey
+    Admin                 // authenticated with the admin role
+};
+
+// Everything a handler needs about the current request.
+struct Context {
+    const CgiRequest& request;
+    const UseCases& useCases;
+    std::string token;                   // session cookie, if well formed
+    std::optional<SessionInfo> session;  // its session, if still valid
+
+    const std::string& script() const { return request.scriptName(); }
+
+    // Only a full session shows the user in the header.
+    std::optional<std::string> username() const
+    {
+        if (session && session->fullyAuthenticated) {
+            return session->username;
         }
-        requestedPage = *parsed;
-    }
-
-    const CatalogPage page = useCases.listCatalog(requestedPage);
-
-    CgiResponse response;
-    response.body = renderPage("Catálogo", renderCatalogBody(page, request.scriptName()),
-                               request.scriptName()).str();
-    return response;
-}
-
-// Reads ?id= for the object pages. On failure, `error` holds the 400 response.
-std::optional<int> objectIDParam(const CgiRequest& request, CgiResponse& error)
-{
-    const auto idParam = request.queryParam("id");
-    if (!idParam) {
-        error = errorResponse(400, "Solicitud incompleta",
-                              "Falta el identificador del objeto.", request.scriptName());
         return std::nullopt;
     }
-    const auto objectID = parsePositiveInt(*idParam);
-    if (!objectID) {
-        error = errorResponse(400, "Identificador inválido",
-                              "El identificador del objeto debe ser un entero positivo.",
-                              request.scriptName());
-    }
-    return objectID;
-}
+};
 
-CgiResponse objectNotFound(const CgiRequest& request)
+using Handler = std::function<CgiResponse(const Context&)>;
+
+struct Route {
+    std::string path;
+    Handler get;   // also serves HEAD
+    Handler post;
+    // Deny by default: a route that does not declare its access level
+    // requires a full session.
+    Access access = Access::Authenticated;
+};
+
+bool satisfies(Access access, const std::optional<SessionInfo>& session)
 {
-    return errorResponse(404, "Objeto no encontrado",
-                         "El objeto solicitado no existe en el mercado.", request.scriptName());
-}
-
-CgiResponse handleObject(const CgiRequest& request, const UseCases& useCases)
-{
-    CgiResponse error;
-    const std::optional<int> objectID = objectIDParam(request, error);
-    if (!objectID) {
-        return error;
+    switch (access) {
+        case Access::Public:
+            return true;
+        case Access::PendingSecondFactor:
+            return session && !session->fullyAuthenticated;
+        case Access::Authenticated:
+            return session && session->fullyAuthenticated;
+        case Access::Admin:
+            return session && session->fullyAuthenticated && session->isAdmin;
     }
-
-    const std::optional<ObjectDetail> detail = useCases.getObjectDetail(*objectID);
-    if (!detail) {
-        return objectNotFound(request);
-    }
-
-    CgiResponse response;
-    response.body = renderPage(detail->object.name,
-                               renderObjectBody(*detail, request.scriptName()),
-                               request.scriptName()).str();
-    return response;
+    return false;
 }
 
-CgiResponse handleHistory(const CgiRequest& request, const UseCases& useCases)
-{
-    CgiResponse error;
-    const std::optional<int> objectID = objectIDParam(request, error);
-    if (!objectID) {
-        return error;
-    }
+// ----------------------------------------------------------------- helpers
 
-    const std::optional<ObjectHistory> history = useCases.getObjectHistory(*objectID);
-    if (!history) {
-        return objectNotFound(request);
-    }
-
-    CgiResponse response;
-    response.body = renderPage("Historial de " + history->objectName,
-                               renderHistoryBody(*history, request.scriptName()),
-                               request.scriptName()).str();
-    return response;
-}
-
-bool isReadMethod(const std::string& method)
-{
-    return method == "GET" || method == "HEAD";
-}
-
-CgiResponse methodNotAllowed(const CgiRequest& request, const char* allowed)
-{
-    CgiResponse response = errorResponse(405, "Método no permitido",
-                                          "Esta dirección no admite ese tipo de solicitud.",
-                                          request.scriptName());
-    response.headers.emplace_back("Allow", allowed);
-    return response;
-}
-
-// Pages that carry or ask for secrets are never stored by the browser.
 CgiResponse noStore(CgiResponse response)
 {
     response.headers.emplace_back("Cache-Control", "no-store");
     return response;
 }
 
-CgiResponse handleRegisterForm(const CgiRequest& request)
+// 303 See Other: after a POST, the browser loads the next page with GET, so
+// reloading it never submits the form again.
+CgiResponse redirect(const Context& c, const std::string& path)
 {
     CgiResponse response;
-    response.body = renderPage("Crear cuenta", renderRegisterBody(request.scriptName(), "", "", {}),
-                               request.scriptName()).str();
+    response.status = 303;
+    response.headers.emplace_back("Location", c.script() + path);
+    response.body = "";
     return noStore(response);
 }
 
-CgiResponse handleRegisterSubmit(const CgiRequest& request, const UseCases& useCases)
+CgiResponse page(const Context& c, const std::string& title, const Html& body, int status = 200)
 {
-    if (request.bodyTooLarge()) {
-        return errorResponse(413, "Solicitud demasiado grande",
-                             "Los datos enviados exceden el tamaño permitido.", request.scriptName());
-    }
-    if (!request.hasFormBody()) {
-        return errorResponse(415, "Formato no admitido",
-                             "Los datos deben enviarse desde el formulario de registro.",
-                             request.scriptName());
-    }
+    CgiResponse response;
+    response.status = status;
+    response.body = renderPage(title, body, c.script(), c.username()).str();
+    return response;
+}
 
+CgiResponse error(const Context& c, int status, const std::string& heading,
+                  const std::string& message)
+{
+    return errorResponse(status, heading, message, c.script(), c.username());
+}
+
+// Common checks for every form submission.
+std::optional<CgiResponse> rejectBadForm(const Context& c)
+{
+    if (c.request.bodyTooLarge()) {
+        return error(c, 413, "Solicitud demasiado grande",
+                     "Los datos enviados exceden el tamaño permitido.");
+    }
+    if (!c.request.hasFormBody()) {
+        return error(c, 415, "Formato no admitido", "Los datos deben enviarse desde un formulario.");
+    }
+    return std::nullopt;
+}
+
+std::string formField(const Context& c, const char* name)
+{
+    return c.request.formParam(name).value_or("");
+}
+
+// ------------------------------------------------------- public pages
+
+CgiResponse handleCatalog(const Context& c)
+{
+    int requestedPage = 1;
+    if (const auto pageParam = c.request.queryParam("page")) {
+        const auto parsed = parsePositiveInt(*pageParam);
+        if (!parsed) {
+            return error(c, 400, "Página inválida", "El número de página debe ser un entero positivo.");
+        }
+        requestedPage = *parsed;
+    }
+    const CatalogPage catalog = c.useCases.listCatalog(requestedPage);
+    return page(c, "Catálogo", renderCatalogBody(catalog, c.script()));
+}
+
+// Reads ?id= for the object pages; on failure `failure` holds the 400.
+std::optional<int> objectIDParam(const Context& c, CgiResponse& failure)
+{
+    const auto idParam = c.request.queryParam("id");
+    if (!idParam) {
+        failure = error(c, 400, "Solicitud incompleta", "Falta el identificador del objeto.");
+        return std::nullopt;
+    }
+    const auto objectID = parsePositiveInt(*idParam);
+    if (!objectID) {
+        failure = error(c, 400, "Identificador inválido",
+                        "El identificador del objeto debe ser un entero positivo.");
+    }
+    return objectID;
+}
+
+CgiResponse handleObject(const Context& c)
+{
+    CgiResponse failure;
+    const std::optional<int> objectID = objectIDParam(c, failure);
+    if (!objectID) {
+        return failure;
+    }
+    const std::optional<ObjectDetail> detail = c.useCases.getObjectDetail(*objectID);
+    if (!detail) {
+        return error(c, 404, "Objeto no encontrado", "El objeto solicitado no existe en el mercado.");
+    }
+    return page(c, detail->object.name, renderObjectBody(*detail, c.script()));
+}
+
+CgiResponse handleHistory(const Context& c)
+{
+    CgiResponse failure;
+    const std::optional<int> objectID = objectIDParam(c, failure);
+    if (!objectID) {
+        return failure;
+    }
+    const std::optional<ObjectHistory> history = c.useCases.getObjectHistory(*objectID);
+    if (!history) {
+        return error(c, 404, "Objeto no encontrado", "El objeto solicitado no existe en el mercado.");
+    }
+    return page(c, "Historial de " + history->objectName, renderHistoryBody(*history, c.script()));
+}
+
+// ----------------------------------------------------------- registration
+
+CgiResponse handleRegisterForm(const Context& c)
+{
+    return noStore(page(c, "Crear cuenta", renderRegisterBody(c.script(), "", "", {})));
+}
+
+CgiResponse handleRegisterSubmit(const Context& c)
+{
+    if (auto bad = rejectBadForm(c)) {
+        return *bad;
+    }
     RegistrationRequest registration;
-    registration.username = request.formParam("username").value_or("");
-    registration.email = request.formParam("email").value_or("");
-    registration.password = request.formParam("password").value_or("");
-    registration.passwordConfirmation = request.formParam("password_confirmation").value_or("");
-    registration.aesKey = request.formParam("aes_key").value_or("");
-    registration.otp = request.formParam("otp").value_or("");
-    registration.clientIP = request.remoteAddress();
+    registration.username = formField(c, "username");
+    registration.email = formField(c, "email");
+    registration.password = formField(c, "password");
+    registration.passwordConfirmation = formField(c, "password_confirmation");
+    registration.aesKey = formField(c, "aes_key");
+    registration.otp = formField(c, "otp");
+    registration.clientIP = c.request.remoteAddress();
 
     // Only these two fields may be written back into the form.
     const std::string username = registration.username;
     const std::string email = registration.email;
 
-    const RegistrationResult result = useCases.registerUser(std::move(registration));
-
-    CgiResponse response;
+    const RegistrationResult result = c.useCases.registerUser(std::move(registration));
     if (result.success) {
-        response.body = renderPage("Cuenta creada",
-                                   renderRegisterDoneBody(request.scriptName(), result.username),
-                                   request.scriptName()).str();
-    } else {
-        response.status = 422;
-        response.body = renderPage("Crear cuenta",
-                                   renderRegisterBody(request.scriptName(), username, email,
-                                                      result.errors),
-                                   request.scriptName()).str();
+        return noStore(page(c, "Cuenta creada", renderRegisterDoneBody(c.script(), result.username)));
     }
-    return noStore(response);
+    return noStore(page(c, "Crear cuenta",
+                        renderRegisterBody(c.script(), username, email, result.errors), 422));
+}
+
+// ------------------------------------------------------------------ login
+
+// The same message for every failure of the first step (RF-2.17): it does
+// not say whether the user exists, the password was wrong or the account
+// is locked.
+constexpr const char* kLoginFailed =
+    "No fue posible iniciar sesión. Revisa tus datos; si fallaste varios intentos, "
+    "espera 15 minutos antes de volver a intentarlo.";
+
+std::optional<std::string> loginNotice(const Context& c)
+{
+    const std::string notice = c.request.queryParam("aviso").value_or("");
+    // Only fixed texts: the parameter selects a message, it is never printed.
+    if (notice == "expirada") return std::string("Tu sesión expiró. Vuelve a iniciar sesión.");
+    if (notice == "bloqueo") return std::string(kLoginFailed);
+    if (notice == "salida") return std::string("Cerraste sesión.");
+    return std::nullopt;
+}
+
+CgiResponse handleLoginForm(const Context& c)
+{
+    if (c.session && c.session->fullyAuthenticated) {
+        return redirect(c, "/cuenta");
+    }
+    return noStore(page(c, "Iniciar sesión",
+                        renderLoginBody(c.script(), "", std::nullopt, loginNotice(c))));
+}
+
+CgiResponse handleLoginSubmit(const Context& c)
+{
+    if (auto bad = rejectBadForm(c)) {
+        return *bad;
+    }
+    const std::string login = formField(c, "login");
+    LoginOutcome outcome =
+        c.useCases.loginWithPassword(login, formField(c, "password"), c.request.remoteAddress());
+    if (!outcome.success) {
+        return noStore(page(c, "Iniciar sesión",
+                            renderLoginBody(c.script(), login, std::string(kLoginFailed), std::nullopt),
+                            422));
+    }
+    CgiResponse response = redirect(c, "/login/yubikey");
+    response.headers.emplace_back("Set-Cookie", sessionCookie(outcome.pendingToken));
+    return response;
+}
+
+CgiResponse handleSecondFactorForm(const Context& c)
+{
+    return noStore(page(c, "Verifica tu YubiKey", renderSecondFactorBody(c.script(), std::nullopt)));
+}
+
+CgiResponse handleSecondFactorSubmit(const Context& c)
+{
+    if (auto bad = rejectBadForm(c)) {
+        return *bad;
+    }
+    const SecondFactorOutcome outcome = c.useCases.verifySecondFactor(
+        c.token, formField(c, "otp"), c.request.remoteAddress());
+
+    switch (outcome.status) {
+        case SecondFactorOutcome::Status::Success: {
+            // A NEW identifier replaces the pending one (fixation, row 3).
+            CgiResponse response = redirect(c, "/cuenta");
+            response.headers.emplace_back("Set-Cookie", sessionCookie(outcome.sessionToken));
+            return response;
+        }
+        case SecondFactorOutcome::Status::Rejected:
+            return noStore(page(c, "Verifica tu YubiKey",
+                                renderSecondFactorBody(c.script(),
+                                    std::string("El código de la YubiKey no es válido. "
+                                                "Toca tu YubiKey para generar uno nuevo.")),
+                                422));
+        case SecondFactorOutcome::Status::Locked: {
+            CgiResponse response = redirect(c, "/login?aviso=bloqueo");
+            response.headers.emplace_back("Set-Cookie", expiredSessionCookie());
+            return response;
+        }
+        case SecondFactorOutcome::Status::SessionExpired:
+            break;
+    }
+    CgiResponse response = redirect(c, "/login?aviso=expirada");
+    response.headers.emplace_back("Set-Cookie", expiredSessionCookie());
+    return response;
+}
+
+CgiResponse handleLogout(const Context& c)
+{
+    if (!c.token.empty() && c.useCases.logout) {
+        c.useCases.logout(c.token, c.request.remoteAddress());
+    }
+    CgiResponse response = redirect(c, "/login?aviso=salida");
+    response.headers.emplace_back("Set-Cookie", expiredSessionCookie());
+    return response;
+}
+
+// ----------------------------------------------------------- user pages
+
+CgiResponse handleAccount(const Context& c)
+{
+    return noStore(page(c, "Mi cuenta", renderAccountBody(c.session->username)));
+}
+
+// ------------------------------------------------------------ route table
+
+const std::vector<Route>& routes()
+{
+    static const std::vector<Route> table = {
+        {"", handleCatalog, nullptr, Access::Public},
+        {"/", handleCatalog, nullptr, Access::Public},
+        {"/catalogo", handleCatalog, nullptr, Access::Public},
+        {"/objeto", handleObject, nullptr, Access::Public},
+        {"/historial", handleHistory, nullptr, Access::Public},
+        {"/registro", handleRegisterForm, handleRegisterSubmit, Access::Public},
+        {"/login", handleLoginForm, handleLoginSubmit, Access::Public},
+        {"/login/yubikey", handleSecondFactorForm, handleSecondFactorSubmit,
+         Access::PendingSecondFactor},
+        {"/logout", nullptr, handleLogout, Access::Public},
+        {"/cuenta", handleAccount, nullptr},  // no level given: requires a full session
+    };
+    return table;
+}
+
+std::string allowedMethods(const Route& route)
+{
+    if (route.get && route.post) return "GET, HEAD, POST";
+    if (route.post) return "POST";
+    return "GET, HEAD";
 }
 
 }  // namespace
 
-CgiResponse errorResponse(int status, const std::string& heading,
-                          const std::string& message, const std::string& scriptName)
+CgiResponse errorResponse(int status, const std::string& heading, const std::string& message,
+                          const std::string& scriptName, const std::optional<std::string>& username)
 {
     CgiResponse response;
     response.status = status;
     response.headers.emplace_back("Cache-Control", "no-store");
-    response.body = renderPage(heading, renderErrorBody(heading, message, scriptName),
-                               scriptName).str();
+    response.body = renderPage(heading, renderErrorBody(heading, message, scriptName), scriptName,
+                               username).str();
     return response;
 }
 
@@ -185,34 +362,59 @@ CgiResponse route(const CgiRequest& request, const UseCases& useCases)
                              request.scriptName());
     }
 
-    const std::string& path = request.path();
+    // The session, if the browser sent a well-formed cookie.
+    Context c{request, useCases, "", std::nullopt};
+    const std::optional<std::string> cookie = request.cookie(kSessionCookieName);
+    if (cookie && Authentication::isWellFormedToken(*cookie)) {
+        c.token = *cookie;
+        if (useCases.resolveSession) {
+            c.session = useCases.resolveSession(c.token);
+        }
+    }
+
+    CgiResponse response;
+    const Route* found = nullptr;
+    for (const Route& candidate : routes()) {
+        if (candidate.path == request.path()) {
+            found = &candidate;
+            break;
+        }
+    }
+
     const std::string& method = request.method();
-
-    // Public pages: read-only.
-    if (path.empty() || path == "/" || path == "/catalogo") {
-        return isReadMethod(method) ? handleCatalog(request, useCases)
-                                    : methodNotAllowed(request, "GET, HEAD");
-    }
-    if (path == "/objeto") {
-        return isReadMethod(method) ? handleObject(request, useCases)
-                                    : methodNotAllowed(request, "GET, HEAD");
-    }
-    if (path == "/historial") {
-        return isReadMethod(method) ? handleHistory(request, useCases)
-                                    : methodNotAllowed(request, "GET, HEAD");
-    }
-
-    // Registration: the form is read with GET; it only changes data with POST (control: row 4).
-    if (path == "/registro") {
-        if (isReadMethod(method)) {
-            return handleRegisterForm(request);
+    if (!found) {
+        response = error(c, 404, "Página no encontrada", "La dirección solicitada no existe.");
+    } else {
+        const Handler& handler = (method == "GET" || method == "HEAD") ? found->get
+                                 : method == "POST"                    ? found->post
+                                                                       : Handler{};
+        if (!handler) {
+            response = error(c, 405, "Método no permitido",
+                             "Esta dirección no admite ese tipo de solicitud.");
+            response.headers.emplace_back("Allow", allowedMethods(*found));
+        } else if (!satisfies(found->access, c.session)) {
+            // Not allowed: to the login, except an authenticated user asking
+            // for an admin page, who gets a plain refusal.
+            if (found->access == Access::Admin && c.session && c.session->fullyAuthenticated) {
+                response = error(c, 403, "Acceso denegado", "No tienes permiso para ver esta página.");
+            } else {
+                response = redirect(c, "/login");
+            }
+        } else {
+            response = handler(c);
         }
-        if (method == "POST") {
-            return handleRegisterSubmit(request, useCases);
-        }
-        return methodNotAllowed(request, "GET, HEAD, POST");
     }
 
-    return errorResponse(404, "Página no encontrada",
-                         "La dirección solicitada no existe.", request.scriptName());
+    // A cookie that no longer matches a valid session is deleted from the
+    // browser, unless this response already sets a new one.
+    if (cookie && !c.session) {
+        bool setsCookie = false;
+        for (const auto& [name, value] : response.headers) {
+            setsCookie = setsCookie || name == "Set-Cookie";
+        }
+        if (!setsCookie) {
+            response.headers.emplace_back("Set-Cookie", expiredSessionCookie());
+        }
+    }
+    return response;
 }

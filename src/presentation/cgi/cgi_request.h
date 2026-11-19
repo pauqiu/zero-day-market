@@ -17,7 +17,8 @@ class CgiRequest {
 
         CgiRequest(std::string method, std::string path, std::string scriptName,
                    std::string queryString, std::string body = "", std::string contentType = "",
-                   std::string remoteAddress = "", bool bodyTooLarge = false);
+                   std::string remoteAddress = "", bool bodyTooLarge = false,
+                   std::string cookieHeader = "");
 
         const std::string& method() const { return requestMethod; }
         const std::string& path() const { return pathInfo; }
@@ -32,6 +33,8 @@ class CgiRequest {
         std::optional<std::string> queryParam(const std::string& name) const;
         // A field of a submitted form; empty if absent.
         std::optional<std::string> formParam(const std::string& name) const;
+        // A cookie sent by the browser (Cookie header); empty if absent.
+        std::optional<std::string> cookie(const std::string& name) const;
 
     private:
         std::string requestMethod;
@@ -40,6 +43,7 @@ class CgiRequest {
         std::size_t rawQueryLength = 0;
         std::map<std::string, std::string> query;
         std::map<std::string, std::string> form;
+        std::map<std::string, std::string> cookies;
         std::string remote;
         bool tooLargeBody = false;
         bool formEncoded = false;
@@ -50,6 +54,9 @@ std::optional<std::string> urlDecode(const std::string& text);
 
 // Splits "a=1&b=2". Malformed pairs are skipped; the first value wins.
 std::map<std::string, std::string> parseQueryString(const std::string& query);
+
+// Splits "a=1; b=2" (the Cookie header). The first value of a name wins.
+std::map<std::string, std::string> parseCookieHeader(const std::string& header);
 
 // Accepts only 1 to 6 decimal digits ("12"), nothing else ("+1", "1e3", "-1").
 std::optional<int> parsePositiveInt(const std::string& text);

@@ -47,12 +47,13 @@ CgiRequest CgiRequest::fromEnvironment()
     }
     return CgiRequest(method, environment("PATH_INFO"), environment("SCRIPT_NAME"),
                       environment("QUERY_STRING"), body, environment("CONTENT_TYPE"),
-                      environment("REMOTE_ADDR"), tooLarge);
+                      environment("REMOTE_ADDR"), tooLarge, environment("HTTP_COOKIE"));
 }
 
 CgiRequest::CgiRequest(std::string method, std::string path, std::string scriptName,
                        std::string queryString, std::string body, std::string contentType,
-                       std::string remoteAddress, bool bodyTooLarge)
+                       std::string remoteAddress, bool bodyTooLarge,
+                       std::string cookieHeader)
     : requestMethod(std::move(method)),
       pathInfo(std::move(path)),
       script(std::move(scriptName)),
@@ -70,6 +71,39 @@ CgiRequest::CgiRequest(std::string method, std::string path, std::string scriptN
     if (formEncoded && !tooLargeBody) {
         form = parseQueryString(body);
     }
+    if (cookieHeader.size() <= 4096) {
+        cookies = parseCookieHeader(cookieHeader);
+    }
+}
+
+std::optional<std::string> CgiRequest::cookie(const std::string& name) const
+{
+    const auto found = cookies.find(name);
+    if (found == cookies.end()) {
+        return std::nullopt;
+    }
+    return found->second;
+}
+
+std::map<std::string, std::string> parseCookieHeader(const std::string& header)
+{
+    std::map<std::string, std::string> result;
+    std::size_t start = 0;
+    while (start < header.size()) {
+        std::size_t end = header.find(';', start);
+        if (end == std::string::npos) {
+            end = header.size();
+        }
+        std::string pair = header.substr(start, end - start);
+        const std::size_t first = pair.find_first_not_of(' ');
+        pair = first == std::string::npos ? "" : pair.substr(first);
+        const std::size_t equals = pair.find('=');
+        if (equals != std::string::npos && equals > 0) {
+            result.emplace(pair.substr(0, equals), pair.substr(equals + 1));
+        }
+        start = end + 1;
+    }
+    return result;
 }
 
 std::optional<std::string> CgiRequest::formParam(const std::string& name) const

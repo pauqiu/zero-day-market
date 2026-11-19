@@ -1,0 +1,19 @@
+{{! Login, first factor: password (HU-09). The password is never written back. }}
+<h1>Iniciar sesión</h1>
+{{#hasNotice}}<p class="notice" role="status">{{notice}}</p>{{/hasNotice}}
+{{#hasError}}
+<div class="errors" role="alert"><p>{{error}}</p></div>
+{{/hasError}}
+
+<form class="form" method="post" action="{{formAction}}">
+  <label for="login">Nombre de usuario o correo</label>
+  <input id="login" name="login" type="text" value="{{login}}" required maxlength="254"
+         autocomplete="username" autocapitalize="none" spellcheck="false">
+
+  <label for="password">Contraseña</label>
+  <input id="password" name="password" type="password" required maxlength="128"
+         autocomplete="current-password">
+
+  <button type="submit">Continuar</button>
+</form>
+<p class="note">¿No tienes cuenta? <a href="{{registerUrl}}">Crea una</a>.</p>

@@ -52,6 +52,7 @@ target_include_directories(domain PUBLIC src)
 # --- Application: use cases and the ports they need -------------------------
 add_library(application STATIC
   src/application/accounts/register_user.cpp
+  src/application/auth/authentication.cpp
   src/application/catalog/list_catalog.cpp
   src/application/objects/get_object_detail.cpp
   src/application/objects/get_object_history.cpp
@@ -62,9 +63,11 @@ target_link_libraries(application PUBLIC domain)
 add_library(infrastructure STATIC
   src/infrastructure/crypto/aes_gcm_secret_box.cpp
   src/infrastructure/crypto/hex.cpp
+  src/infrastructure/crypto/random_session_tokens.cpp
   src/infrastructure/crypto/scrypt_password_hasher.cpp
   src/infrastructure/db/db_config.cpp
   src/infrastructure/db/mariadb_account_repository.cpp
+  src/infrastructure/db/mariadb_auth_repository.cpp
   src/infrastructure/db/mariadb_connection.cpp
   src/infrastructure/db/mariadb_catalog_repository.cpp
   src/infrastructure/db/mariadb_object_detail_repository.cpp
@@ -96,6 +99,7 @@ add_library(presentation STATIC
   src/presentation/cgi/cgi_response.cpp
   src/presentation/pages/html.cpp
   src/presentation/pages/layout.cpp
+  src/presentation/pages/auth_pages.cpp
   src/presentation/pages/catalog_page.cpp
   src/presentation/pages/formatting.cpp
   src/presentation/pages/history_page.cpp

@@ -1,0 +1,14 @@
+{{! Login, second factor: YubiKey (HU-11). }}
+<h1>Verifica tu YubiKey</h1>
+<p class="lead">Tu contraseña es correcta. Para completar el inicio de sesión, toca tu YubiKey.</p>
+{{#hasError}}
+<div class="errors" role="alert"><p>{{error}}</p></div>
+{{/hasError}}
+
+<form class="form" method="post" action="{{formAction}}">
+  <label for="otp">Código de la YubiKey</label>
+  <input id="otp" name="otp" type="text" required minlength="44" maxlength="44"
+         autocomplete="off" spellcheck="false" autofocus>
+  <p class="hint">Haz clic en este campo y toca tu YubiKey. Tienes 5 minutos.</p>
+  <button type="submit">Iniciar sesión</button>
+</form>

@@ -10,7 +10,17 @@
   <header class="site-header">
     <a class="brand" href="{{homeUrl}}">{{commercialName}}</a>
     <span class="market">Mercado el Día Cero</span>
-    <nav class="site-nav"><a href="{{registerUrl}}">Crear cuenta</a></nav>
+    <nav class="site-nav">
+      {{#loggedIn}}
+      <span class="who">{{username}}</span>
+      <a href="{{accountUrl}}">Mi cuenta</a>
+      <form class="inline" method="post" action="{{logoutUrl}}"><button type="submit" class="link">Cerrar sesión</button></form>
+      {{/loggedIn}}
+      {{^loggedIn}}
+      <a href="{{loginUrl}}">Iniciar sesión</a>
+      <a href="{{registerUrl}}">Crear cuenta</a>
+      {{/loggedIn}}
+    </nav>
   </header>
   <main>
 {{{body}}}

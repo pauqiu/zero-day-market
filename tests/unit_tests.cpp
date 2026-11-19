@@ -6,20 +6,24 @@
 #include <array>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 
 #include "application/accounts/register_user.h"
+#include "application/auth/authentication.h"
 #include "application/catalog/list_catalog.h"
 #include "application/objects/get_object_detail.h"
 #include "application/objects/get_object_history.h"
 #include "domain/objects/transfer_rules.h"
 #include "domain/users/account_rules.h"
 #include "infrastructure/crypto/aes_gcm_secret_box.h"
+#include "infrastructure/crypto/random_session_tokens.h"
 #include "infrastructure/crypto/scrypt_password_hasher.h"
 #include "infrastructure/yubikey/libyubikey_otp_decoder.h"
 #include "presentation/cgi/cgi_request.h"
 #include "presentation/pages/catalog_page.h"
+#include "presentation/cgi/session_cookie.h"
 #include "presentation/pages/formatting.h"
 #include "presentation/pages/history_page.h"
 #include "presentation/pages/html.h"
@@ -690,6 +694,441 @@ void testRegistrationRoutes()
     CHECK(route(CgiRequest("POST", "/catalogo", "/app.cgi", "", body, formType), useCases).status == 405);
 }
 
+
+// ------------------------------------------------------------------- login
+
+// In-memory AuthRepository with the same semantics as the SQL statements.
+class FakeAuthRepository : public AuthRepository {
+    public:
+        struct User {
+            LoginUser login;
+            std::string email;
+            int failedAttempts = 0;
+            bool isAdmin = false;
+        };
+        std::map<int, User> users;
+        std::map<int, StoredYubikey> keys;                 // by user ID
+        std::map<std::string, SessionRecord> sessions;    // by ID hash
+        std::vector<std::string> audits;
+        std::vector<std::string> incidents;
+
+        std::optional<LoginUser> findUserByUsername(const std::string& username) override
+        {
+            for (const auto& [id, user] : users) {
+                if (user.login.username == username) return user.login;
+            }
+            return std::nullopt;
+        }
+        std::optional<LoginUser> findUserByEmail(const std::string& email) override
+        {
+            for (const auto& [id, user] : users) {
+                if (user.email == email) return user.login;
+            }
+            return std::nullopt;
+        }
+        std::optional<LoginUser> findUserByID(int userID) override
+        {
+            const auto found = users.find(userID);
+            return found == users.end() ? std::nullopt : std::optional(found->second.login);
+        }
+        bool recordFailedAttempt(int userID, int maxAttempts, std::int64_t lockUntil) override
+        {
+            User& user = users.at(userID);
+            if (user.failedAttempts + 1 >= maxAttempts) {
+                user.login.lockedUntil = lockUntil;
+                user.failedAttempts = 0;
+                return true;
+            }
+            ++user.failedAttempts;
+            return false;
+        }
+        void resetFailedAttempts(int userID) override
+        {
+            users.at(userID).failedAttempts = 0;
+            users.at(userID).login.lockedUntil.reset();
+        }
+        std::optional<StoredYubikey> findYubikey(int userID) override
+        {
+            const auto found = keys.find(userID);
+            return found == keys.end() ? std::nullopt : std::optional(found->second);
+        }
+        bool advanceOtpCounters(int keyID, int counter, int sessionUse) override
+        {
+            for (auto& [userID, key] : keys) {
+                if (key.keyID == keyID && (key.lastCounter < counter ||
+                    (key.lastCounter == counter && key.lastSessionUse < sessionUse))) {
+                    key.lastCounter = counter;
+                    key.lastSessionUse = sessionUse;
+                    return true;
+                }
+            }
+            return false;
+        }
+        void createSession(const NewSession& s) override
+        {
+            const User& user = users.at(s.userID);
+            sessions[s.idHash] = SessionRecord{s.idHash, s.userID, user.login.username, user.isAdmin,
+                                               user.login.status == "active", s.mfaVerified,
+                                               s.createdAt, s.createdAt, s.expiresAt};
+        }
+        std::optional<SessionRecord> findSession(const std::string& idHash) override
+        {
+            const auto found = sessions.find(idHash);
+            return found == sessions.end() ? std::nullopt : std::optional(found->second);
+        }
+        void touchSession(const std::string& idHash, std::int64_t now) override
+        {
+            sessions.at(idHash).lastSeenAt = now;
+        }
+        void deleteSession(const std::string& idHash) override { sessions.erase(idHash); }
+        void audit(std::string_view, std::string_view description, std::string_view,
+                   std::optional<int>, std::string_view) override
+        {
+            audits.emplace_back(description);
+        }
+        void incident(std::string_view, std::string_view description, std::string_view,
+                      std::optional<int>, std::string_view) override
+        {
+            incidents.emplace_back(description);
+        }
+};
+
+class CountingHasher : public PasswordHasher {
+    public:
+        int verifications = 0;
+        std::string hash(std::string_view password) override { return "h:" + std::string(password); }
+        bool verify(std::string_view password, std::string_view stored) override
+        {
+            ++verifications;
+            return stored == "h:" + std::string(password);
+        }
+};
+
+// A user "pierrot" (ID 7) with password "Clave segura 2026" and the test
+// YubiKey registered with counter 9, session use 2.
+struct AuthFixture {
+    std::int64_t clock = 1'800'000'000;
+    FakeAuthRepository repository;
+    CountingHasher hasher;
+    std::array<unsigned char, 32> masterKey{};
+    AesGcmSecretBox box;
+    LibyubikeyOtpDecoder decoder;
+    RandomSessionTokens tokens;
+    Authentication auth;
+
+    AuthFixture()
+        : box(AesGcmSecretBox::fromKey(masterKey)),
+          auth(repository, hasher, box, decoder, tokens, [this] { return clock; })
+    {
+        FakeAuthRepository::User user;
+        user.login = LoginUser{7, "pierrot", "h:Clave segura 2026", "active", std::nullopt};
+        user.email = "pierrot@nac.ucr.ac.cr";
+        repository.users[7] = user;
+
+        const std::vector<unsigned char> aesKey = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                                                   0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
+        const std::vector<unsigned char> uid = {0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+        StoredYubikey key;
+        key.keyID = 3;
+        key.publicID = kTestPublicID;
+        key.aesKeySealed = box.seal(aesKey, "yubikey-aes-key:" + kTestPublicID);
+        key.privateIDSealed = box.seal(uid, "yubikey-private-id:" + kTestPublicID);
+        key.lastCounter = 9;
+        key.lastSessionUse = 2;
+        repository.keys[7] = key;
+    }
+
+    std::string password() const { return "Clave segura 2026"; }
+    std::string otp(std::uint16_t counter, std::uint8_t use = 0) const
+    {
+        return makeOtp(kTestAesKey, kTestPublicID, counter, use);
+    }
+
+    // Full login; returns the session token (empty on failure).
+    std::string login(std::uint16_t counter)
+    {
+        const LoginOutcome first = auth.loginWithPassword("pierrot", password(), "10.0.0.5");
+        if (!first.success) return "";
+        const SecondFactorOutcome second = auth.verifySecondFactor(first.pendingToken, otp(counter), "10.0.0.5");
+        return second.status == SecondFactorOutcome::Status::Success ? second.sessionToken : "";
+    }
+};
+
+bool contains(const std::vector<std::string>& items, const std::string& text)
+{
+    for (const std::string& item : items) {
+        if (item.find(text) != std::string::npos) return true;
+    }
+    return false;
+}
+
+void testPasswordStep()
+{
+    AuthFixture f;
+
+    // Unknown user: fails, but a password check still runs (same timing).
+    CHECK(!f.auth.loginWithPassword("nadie", "x", "10.0.0.5").success);
+    CHECK(f.hasher.verifications == 1);
+    CHECK(contains(f.repository.audits, "usuario inexistente"));
+    CHECK(!f.auth.loginWithPassword("x' OR '1'='1", "x", "10.0.0.5").success);  // not even looked up
+
+    // Correct password: a pending session, stored only as a hash.
+    const LoginOutcome ok = f.auth.loginWithPassword("pierrot", f.password(), "10.0.0.5");
+    CHECK(ok.success && Authentication::isWellFormedToken(ok.pendingToken));
+    CHECK(f.repository.sessions.count(ok.pendingToken) == 0);
+    const auto pending = f.repository.findSession(f.tokens.hash(ok.pendingToken));
+    CHECK(pending && !pending->mfaVerified && pending->expiresAt == f.clock + 300);
+
+    // Login by email, case-insensitive.
+    CHECK(f.auth.loginWithPassword("Pierrot@NAC.ucr.ac.cr", f.password(), "10.0.0.5").success);
+
+    // A pending session is not a full one.
+    const auto info = f.auth.resolveSession(ok.pendingToken);
+    CHECK(info && !info->fullyAuthenticated);
+
+    // Inactive accounts cannot log in.
+    f.repository.users[7].login.status = "pending";
+    CHECK(!f.auth.loginWithPassword("pierrot", f.password(), "10.0.0.5").success);
+}
+
+void testLockout()
+{
+    AuthFixture f;
+    CHECK(!f.auth.loginWithPassword("pierrot", "mala 1", "10.0.0.5").success);
+    CHECK(!f.auth.loginWithPassword("pierrot", "mala 2", "10.0.0.5").success);
+    CHECK(f.repository.incidents.empty());
+    CHECK(!f.auth.loginWithPassword("pierrot", "mala 3", "10.0.0.5").success);  // locks
+    CHECK(contains(f.repository.incidents, "bloqueada"));
+
+    // Even the right password fails while locked...
+    CHECK(!f.auth.loginWithPassword("pierrot", f.password(), "10.0.0.5").success);
+    // ...and works again when the lock expires (temporary lock, row 20).
+    f.clock += 15 * 60;
+    CHECK(f.auth.loginWithPassword("pierrot", f.password(), "10.0.0.5").success);
+}
+
+void testSecondFactor()
+{
+    AuthFixture f;
+    const LoginOutcome first = f.auth.loginWithPassword("pierrot", f.password(), "10.0.0.5");
+    const SecondFactorOutcome second = f.auth.verifySecondFactor(first.pendingToken, f.otp(10), "10.0.0.5");
+    CHECK(second.status == SecondFactorOutcome::Status::Success);
+
+    // A NEW identifier; the pending one is gone (fixation, row 3).
+    CHECK(second.sessionToken != first.pendingToken);
+    CHECK(!f.auth.resolveSession(first.pendingToken));
+    const auto info = f.auth.resolveSession(second.sessionToken);
+    CHECK(info && info->fullyAuthenticated && info->username == "pierrot");
+    CHECK(f.repository.keys[7].lastCounter == 10);
+
+    // Replay: the same OTP in a new login is refused, with an incident (row 21).
+    const LoginOutcome again = f.auth.loginWithPassword("pierrot", f.password(), "10.0.0.5");
+    CHECK(f.auth.verifySecondFactor(again.pendingToken, f.otp(10), "10.0.0.5").status ==
+          SecondFactorOutcome::Status::Rejected);
+    CHECK(contains(f.repository.incidents, "reutilizar"));
+    // An older OTP too (second failure)...
+    CHECK(f.auth.verifySecondFactor(again.pendingToken, f.otp(9, 7), "10.0.0.5").status ==
+          SecondFactorOutcome::Status::Rejected);
+    // ...but a newer one works: same usage counter, higher session counter.
+    CHECK(f.auth.verifySecondFactor(again.pendingToken, f.otp(10, 3), "10.0.0.5").status ==
+          SecondFactorOutcome::Status::Success);
+    CHECK(f.repository.keys[7].lastCounter == 10 && f.repository.keys[7].lastSessionUse == 3);
+}
+
+void testSecondFactorRejections()
+{
+    AuthFixture f;
+    LoginOutcome first = f.auth.loginWithPassword("pierrot", f.password(), "10.0.0.5");
+
+    // An OTP from another YubiKey (other public ID, other key).
+    CHECK(f.auth.verifySecondFactor(first.pendingToken,
+              makeOtp("ffeeddccbbaa99887766554433221100", "vvccccbcdefg", 50, 0), "10.0.0.5").status ==
+          SecondFactorOutcome::Status::Rejected);
+    // Malformed.
+    CHECK(f.auth.verifySecondFactor(first.pendingToken, "abc", "10.0.0.5").status ==
+          SecondFactorOutcome::Status::Rejected);
+    // Third failure: locked, and the pending session is deleted.
+    CHECK(f.auth.verifySecondFactor(first.pendingToken, "abc", "10.0.0.5").status ==
+          SecondFactorOutcome::Status::Locked);
+    CHECK(!f.auth.resolveSession(first.pendingToken));
+    CHECK(!f.auth.loginWithPassword("pierrot", f.password(), "10.0.0.5").success);
+
+    // The pending session expires after 5 minutes.
+    AuthFixture g;
+    first = g.auth.loginWithPassword("pierrot", g.password(), "10.0.0.5");
+    g.clock += 300;
+    CHECK(g.auth.verifySecondFactor(first.pendingToken, g.otp(10), "10.0.0.5").status ==
+          SecondFactorOutcome::Status::SessionExpired);
+
+    // Altered sealed secrets in the database: rejected, with an integrity incident.
+    AuthFixture h;
+    h.repository.keys[7].privateIDSealed[20] ^= 0x01;
+    first = h.auth.loginWithPassword("pierrot", h.password(), "10.0.0.5");
+    CHECK(h.auth.verifySecondFactor(first.pendingToken, h.otp(10), "10.0.0.5").status ==
+          SecondFactorOutcome::Status::Rejected);
+    CHECK(contains(h.repository.incidents, "secretos"));
+
+    // A token that is not well formed is never looked up.
+    CHECK(h.auth.verifySecondFactor("' OR 1=1 --", h.otp(11), "10.0.0.5").status ==
+          SecondFactorOutcome::Status::SessionExpired);
+}
+
+void testSessionLifetime()
+{
+    AuthFixture f;
+    const std::string token = f.login(10);
+    CHECK(!token.empty());
+
+    // Activity keeps it alive; 15 minutes of inactivity end it.
+    f.clock += 14 * 60;
+    CHECK(f.auth.resolveSession(token));
+    f.clock += 14 * 60;
+    CHECK(f.auth.resolveSession(token));
+    f.clock += 15 * 60;
+    CHECK(!f.auth.resolveSession(token));
+    CHECK(f.repository.sessions.empty());  // deleted on the server
+
+    // Absolute limit: 8 hours, even with constant activity.
+    const std::string second = f.login(11);
+    for (int i = 0; i < 47; ++i) {  // 47 * 10 minutes = 7 h 50 min
+        f.clock += 10 * 60;
+        CHECK(f.auth.resolveSession(second));
+    }
+    f.clock += 10 * 60;
+    CHECK(!f.auth.resolveSession(second));
+
+    // Logout deletes the session on the server.
+    const std::string third = f.login(12);
+    f.auth.logout(third, "10.0.0.5");
+    CHECK(!f.auth.resolveSession(third));
+    CHECK(contains(f.repository.audits, "Cierre de sesion"));
+}
+
+bool setsCookie(const CgiResponse& response, const std::string& fragment)
+{
+    for (const auto& [name, value] : response.headers) {
+        if (name == "Set-Cookie" && value.find(fragment) != std::string::npos) return true;
+    }
+    return false;
+}
+
+std::string location(const CgiResponse& response)
+{
+    for (const auto& [name, value] : response.headers) {
+        if (name == "Location") return value;
+    }
+    return "";
+}
+
+void testAccessControlRoutes()
+{
+    const std::string fullToken(64, 'a');
+    const std::string pendingToken(64, 'b');
+    UseCases useCases;
+    useCases.listCatalog = [](int) { return CatalogPage{}; };
+    int resolved = 0;
+    useCases.resolveSession = [&](const std::string& token) -> std::optional<SessionInfo> {
+        ++resolved;
+        if (token == fullToken) return SessionInfo{7, "pierrot", false, true};
+        if (token == pendingToken) return SessionInfo{7, "pierrot", false, false};
+        return std::nullopt;
+    };
+    const std::string cookieName = kSessionCookieName;
+    auto get = [&](const std::string& path, const std::string& cookie) {
+        return route(CgiRequest("GET", path, "/app.cgi", "", "", "", "10.0.0.5", false,
+                                cookie.empty() ? "" : cookieName + "=" + cookie),
+                     useCases);
+    };
+
+    // Protected page: only with a full session.
+    CHECK(get("/cuenta", "").status == 303 && location(get("/cuenta", "")) == "/app.cgi/login");
+    CHECK(get("/cuenta", pendingToken).status == 303);
+    const CgiResponse account = get("/cuenta", fullToken);
+    CHECK(account.status == 200 && account.body.find("pierrot") != std::string::npos);
+    CHECK(account.body.find("Cerrar sesión") != std::string::npos);
+
+    // The YubiKey step: only with a pending session.
+    CHECK(get("/login/yubikey", "").status == 303);
+    CHECK(get("/login/yubikey", fullToken).status == 303);
+    CHECK(get("/login/yubikey", pendingToken).status == 200);
+
+    // A logged-in user asking for the login page goes to their account.
+    CHECK(location(get("/login", fullToken)) == "/app.cgi/cuenta");
+
+    // A stale cookie is deleted; a malformed one is not even looked up.
+    CHECK(setsCookie(get("/catalogo", std::string(64, 'c')), "Max-Age=0"));
+    resolved = 0;
+    get("/catalogo", "zz' OR 1=1");
+    CHECK(resolved == 0);
+    CHECK(!setsCookie(get("/catalogo", fullToken), "Set-Cookie"));
+
+    // Only fixed notices; the parameter is never printed.
+    const CgiResponse notice = route(CgiRequest("GET", "/login", "/app.cgi", "aviso=%3Cscript%3E"), useCases);
+    CHECK(notice.body.find("<script>") == std::string::npos && notice.body.find("&lt;script") == std::string::npos);
+}
+
+void testLoginRoutes()
+{
+    UseCases useCases;
+    std::string loggedOut;
+    SecondFactorOutcome::Status nextStatus = SecondFactorOutcome::Status::Success;
+    useCases.resolveSession = [](const std::string& token) -> std::optional<SessionInfo> {
+        if (token == std::string(64, 'b')) return SessionInfo{7, "pierrot", false, false};
+        return std::nullopt;
+    };
+    useCases.loginWithPassword = [](std::string login, std::string password, const std::string&) {
+        LoginOutcome outcome;
+        if (login == "pierrot" && password == "Clave segura 2026") {
+            outcome.success = true;
+            outcome.pendingToken = std::string(64, 'b');
+        }
+        return outcome;
+    };
+    useCases.verifySecondFactor = [&](const std::string&, std::string, const std::string&) {
+        return SecondFactorOutcome{nextStatus, std::string(64, 'd')};
+    };
+    useCases.logout = [&](const std::string& token, const std::string&) { loggedOut = token; };
+    const std::string form = "application/x-www-form-urlencoded";
+    const std::string pendingCookie = std::string(kSessionCookieName) + "=" + std::string(64, 'b');
+
+    // Password step.
+    const CgiResponse ok = route(CgiRequest("POST", "/login", "/app.cgi", "",
+                                            "login=pierrot&password=Clave+segura+2026", form), useCases);
+    CHECK(ok.status == 303 && location(ok) == "/app.cgi/login/yubikey");
+    CHECK(setsCookie(ok, "__Host-jc_session=" + std::string(64, 'b')));
+    CHECK(setsCookie(ok, "; Path=/; Secure; HttpOnly; SameSite=Lax"));
+    CHECK(!setsCookie(ok, "Max-Age"));
+
+    const CgiResponse bad = route(CgiRequest("POST", "/login", "/app.cgi", "",
+                                             "login=%3Cb%3Epierrot&password=Secreta+mala", form), useCases);
+    CHECK(bad.status == 422 && bad.body.find("No fue posible iniciar sesión") != std::string::npos);
+    CHECK(bad.body.find("&lt;b&gt;pierrot") != std::string::npos);
+    CHECK(bad.body.find("Secreta") == std::string::npos);
+    CHECK(!setsCookie(bad, "jc_session="));
+
+    // YubiKey step, each outcome.
+    auto otpStep = [&] {
+        return route(CgiRequest("POST", "/login/yubikey", "/app.cgi", "", "otp=x", form, "10.0.0.5",
+                                false, pendingCookie), useCases);
+    };
+    CgiResponse step = otpStep();
+    CHECK(step.status == 303 && location(step) == "/app.cgi/cuenta" &&
+          setsCookie(step, "__Host-jc_session=" + std::string(64, 'd')));
+    nextStatus = SecondFactorOutcome::Status::Rejected;
+    CHECK(otpStep().status == 422);
+    nextStatus = SecondFactorOutcome::Status::Locked;
+    step = otpStep();
+    CHECK(location(step) == "/app.cgi/login?aviso=bloqueo" && setsCookie(step, "Max-Age=0"));
+    nextStatus = SecondFactorOutcome::Status::SessionExpired;
+    CHECK(location(otpStep()) == "/app.cgi/login?aviso=expirada");
+
+    // Logout: POST only, deletes the session and the cookie.
+    CHECK(route(CgiRequest("GET", "/logout", "/app.cgi", ""), useCases).status == 405);
+    const CgiResponse out = route(CgiRequest("POST", "/logout", "/app.cgi", "", "", form, "10.0.0.5",
+                                             false, pendingCookie), useCases);
+    CHECK(out.status == 303 && loggedOut == std::string(64, 'b') && setsCookie(out, "Max-Age=0"));
+}
+
 void testRouter()
 {
     UseCases useCases;
@@ -766,6 +1205,13 @@ int main()
     testRegisterUser();
     testFormRequests();
     testRegistrationRoutes();
+    testPasswordStep();
+    testLockout();
+    testSecondFactor();
+    testSecondFactorRejections();
+    testSessionLifetime();
+    testAccessControlRoutes();
+    testLoginRoutes();
     testTemplateEngine();
     testEmbeddedTemplatesRender();
     testRouter();
