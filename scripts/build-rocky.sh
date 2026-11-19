@@ -32,7 +32,7 @@ mkdir -p "$DIST"
     dnf config-manager --set-enabled crb
     dnf -y -q install epel-release > /dev/null
     dnf -y -q install gcc-c++ make cmake pkgconf-pkg-config mariadb-connector-c-devel \
-        openssl-devel libyubikey-devel > /dev/null
+        openssl-devel libyubikey-devel libcurl-devel > /dev/null
     cmake -S /src -B /tmp/build -DCMAKE_BUILD_TYPE=Release -DJC_WERROR="$JC_WERROR" > /dev/null
     cmake --build /tmp/build -j"$(nproc)"
     ctest --test-dir /tmp/build --output-on-failure
@@ -41,7 +41,8 @@ mkdir -p "$DIST"
 
 mkdir -p "$DIST/static"
 cp "$REPO"/static/* "$DIST/static/"
-cp "$REPO/deploy/apache/jesterschest.conf" "$REPO/deploy/install-vmservicios.sh" "$DIST/"
+cp "$REPO/deploy/apache/jesterschest.conf" "$REPO/deploy/install-vmservicios.sh" \
+   "$REPO/deploy/mail-pin.sh" "$REPO/deploy/mail.conf.example" "$DIST/"
 (cd "$DIST" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 
 echo

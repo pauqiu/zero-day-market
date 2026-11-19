@@ -47,9 +47,12 @@ Html renderRegisterBody(const std::string& scriptName, const std::string& userna
     return renderNamedTemplate("register", context);
 }
 
-Html renderRegisterDoneBody(const std::string& scriptName, const std::string& username)
+Html renderRegisterDoneBody(const std::string& scriptName, const RegistrationResult& result)
 {
     TemplateContext context;
-    context.setText("username", username).setText("catalogUrl", scriptName + "/catalogo");
+    context.setText("username", result.username)
+        .setText("email", result.email)
+        .setFlag("sent", result.verificationSent)
+        .setText("resendUrl", scriptName + "/verificar/reenviar");
     return renderNamedTemplate("register_done", context);
 }

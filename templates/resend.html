@@ -1,0 +1,8 @@
+{{! Resend of the verification link (RF-2.9). }}
+<h1>Reenviar el enlace de activación</h1>
+<p class="lead">Escribe el correo con el que te registraste. Si tu cuenta todavía no está activa, te enviaremos un enlace nuevo, y el anterior dejará de funcionar.</p>
+<form class="form" method="post" action="{{formAction}}">
+  <label for="email">Correo electrónico</label>
+  <input id="email" name="email" type="email" required maxlength="254" autocomplete="email">
+  <button type="submit">Enviar enlace</button>
+</form>

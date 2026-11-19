@@ -1,0 +1,13 @@
+{{! Result of the activation (HU-07, HU-08). }}
+{{#activated}}
+<h1>Cuenta activada</h1>
+<p>La cuenta <strong>{{username}}</strong> ya está activa.</p>
+{{#hasObjects}}<p>Recibiste {{objects}} {{#oneObject}}objeto{{/oneObject}}{{^oneObject}}objetos{{/oneObject}} del inventario del mercado para empezar.</p>{{/hasObjects}}
+{{^hasObjects}}<p>El inventario inicial del mercado está agotado, así que esta vez no recibiste objetos.</p>{{/hasObjects}}
+<p><a href="{{loginUrl}}">Iniciar sesión</a></p>
+{{/activated}}
+{{^activated}}
+<h1>Enlace no válido</h1>
+<p>El enlace no es válido, ya se usó o venció.</p>
+<p><a href="{{resendUrl}}">Pide un enlace nuevo</a></p>
+{{/activated}}

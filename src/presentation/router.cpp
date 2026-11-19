@@ -206,10 +206,46 @@ CgiResponse handleRegisterSubmit(const Context& c)
 
     const RegistrationResult result = c.useCases.registerUser(std::move(registration));
     if (result.success) {
-        return noStore(page(c, "Cuenta creada", renderRegisterDoneBody(c.script(), result.username)));
+        return noStore(page(c, "Revisa tu correo", renderRegisterDoneBody(c.script(), result)));
     }
     return noStore(page(c, "Crear cuenta",
                         renderRegisterBody(c.script(), username, email, result.errors), 422));
+}
+
+// ------------------------------------------------------- email verification
+
+CgiResponse handleVerifyForm(const Context& c)
+{
+    const std::string token = c.request.queryParam("token").value_or("");
+    if (!Authentication::isWellFormedToken(token)) {
+        return noStore(page(c, "Enlace no válido", renderVerifyDoneBody(c.script(), ActivationOutcome{})));
+    }
+    return noStore(page(c, "Activa tu cuenta", renderVerifyBody(c.script(), token)));
+}
+
+CgiResponse handleVerifySubmit(const Context& c)
+{
+    if (auto bad = rejectBadForm(c)) {
+        return *bad;
+    }
+    const ActivationOutcome outcome =
+        c.useCases.activateAccount(formField(c, "token"), c.request.remoteAddress());
+    return noStore(page(c, outcome.activated ? "Cuenta activada" : "Enlace no válido",
+                        renderVerifyDoneBody(c.script(), outcome), outcome.activated ? 200 : 422));
+}
+
+CgiResponse handleResendForm(const Context& c)
+{
+    return noStore(page(c, "Reenviar el enlace de activación", renderResendBody(c.script())));
+}
+
+CgiResponse handleResendSubmit(const Context& c)
+{
+    if (auto bad = rejectBadForm(c)) {
+        return *bad;
+    }
+    c.useCases.resendVerification(formField(c, "email"), c.request.remoteAddress());
+    return noStore(page(c, "Revisa tu correo", renderResendDoneBody()));
 }
 
 // ------------------------------------------------------------------ login
@@ -325,6 +361,8 @@ const std::vector<Route>& routes()
         {"/objeto", handleObject, nullptr, Access::Public},
         {"/historial", handleHistory, nullptr, Access::Public},
         {"/registro", handleRegisterForm, handleRegisterSubmit, Access::Public},
+        {"/verificar", handleVerifyForm, handleVerifySubmit, Access::Public},
+        {"/verificar/reenviar", handleResendForm, handleResendSubmit, Access::Public},
         {"/login", handleLoginForm, handleLoginSubmit, Access::Public},
         {"/login/yubikey", handleSecondFactorForm, handleSecondFactorSubmit,
          Access::PendingSecondFactor},

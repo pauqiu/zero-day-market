@@ -5,6 +5,7 @@
 #include <iostream>
 #include <memory>
 
+#include "application/accounts/account_activation.h"
 #include "application/accounts/register_user.h"
 #include "application/auth/authentication.h"
 #include "application/catalog/list_catalog.h"
@@ -20,6 +21,7 @@
 #include "infrastructure/db/mariadb_connection.h"
 #include "infrastructure/db/mariadb_object_detail_repository.h"
 #include "infrastructure/db/mariadb_object_history_repository.h"
+#include "infrastructure/mail/email_notifier.h"
 #include "infrastructure/yubikey/libyubikey_otp_decoder.h"
 #include "presentation/cgi/cgi_request.h"
 #include "presentation/router.h"
@@ -29,6 +31,9 @@
 #endif
 #ifndef JC_MASTER_KEY_PATH
 #error "JC_MASTER_KEY_PATH must be defined by the build"
+#endif
+#ifndef JC_MAIL_CONFIG_PATH
+#error "JC_MAIL_CONFIG_PATH must be defined by the build"
 #endif
 
 namespace {
@@ -60,7 +65,8 @@ class Services {
             if (!auth) {
                 authRepository = std::make_unique<MariaDbAuthRepository>(db());
                 auth = std::make_unique<Authentication>(*authRepository, hasher, secrets(), decoder,
-                                                        tokens, GetObjectDetail::systemClock);
+                                                        tokens, notifier,
+                                                        GetObjectDetail::systemClock);
             }
             return *auth;
         }
@@ -68,6 +74,8 @@ class Services {
         ScryptPasswordHasher hasher;
         LibyubikeyOtpDecoder decoder;
         RandomSessionTokens tokens;
+        // Reads mail.conf only when a message is actually sent.
+        EmailNotifier notifier{JC_MAIL_CONFIG_PATH, GetObjectDetail::systemClock};
 
     private:
         std::unique_ptr<MariaDbConnection> connection;
@@ -98,8 +106,21 @@ int main()
     };
     useCases.registerUser = [&services](RegistrationRequest registration) {
         MariaDbAccountRepository accounts(services.db());
-        RegisterUser registerUser(accounts, services.hasher, services.secrets(), services.decoder);
+        RegisterUser registerUser(accounts, services.hasher, services.secrets(), services.decoder,
+                                  services.tokens, services.notifier, GetObjectDetail::systemClock);
         return registerUser.execute(std::move(registration));
+    };
+    useCases.activateAccount = [&services](const std::string& token, const std::string& clientIP) {
+        MariaDbAccountRepository accounts(services.db());
+        AccountActivation activation(accounts, services.tokens, services.notifier,
+                                     GetObjectDetail::systemClock);
+        return activation.activate(token, clientIP);
+    };
+    useCases.resendVerification = [&services](const std::string& email, const std::string& clientIP) {
+        MariaDbAccountRepository accounts(services.db());
+        AccountActivation activation(accounts, services.tokens, services.notifier,
+                                     GetObjectDetail::systemClock);
+        activation.resend(email, clientIP);
     };
     useCases.loginWithPassword = [&services](std::string login, std::string password,
                                              const std::string& clientIP) {

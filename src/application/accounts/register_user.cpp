@@ -48,8 +48,15 @@ bool allOf(const std::string& text, std::size_t length, bool (*accept)(char))
 }  // namespace
 
 RegisterUser::RegisterUser(AccountRepository& accounts, PasswordHasher& hasher,
-                           SecretBox& secrets, YubikeyOtpDecoder& decoder)
-    : accounts(accounts), hasher(hasher), secrets(secrets), decoder(decoder)
+                           SecretBox& secrets, YubikeyOtpDecoder& decoder, SessionTokens& tokens,
+                           Notifier& notifier, Clock now)
+    : accounts(accounts),
+      hasher(hasher),
+      secrets(secrets),
+      decoder(decoder),
+      tokens(tokens),
+      notifier(notifier),
+      now(std::move(now))
 {
 }
 
@@ -133,6 +140,12 @@ RegistrationResult RegisterUser::execute(RegistrationRequest request)
     wipe(otp->aesKey);
     wipe(otp->privateID);
 
+    // The verification link (HU-07): a random token sent only by email; the
+    // database keeps its hash, so a copy of it cannot activate accounts.
+    std::string verificationToken = tokens.newToken();
+    account.verificationTokenHash = tokens.hash(verificationToken);
+    account.verificationExpiresAt = now() + kVerificationSeconds;
+
     // 4. Store everything in one transaction. Unique constraints decide the
     //    races between simultaneous registrations.
     const CreateAccountResult created = accounts.createAccount(account);
@@ -141,6 +154,15 @@ RegistrationResult RegisterUser::execute(RegistrationRequest request)
             result.success = true;
             result.userID = created.userID;
             result.username = account.username;
+            result.email = account.email;
+            // The account exists even if the email fails: the user can ask
+            // for the link again (RF-2.9), and the failure is logged.
+            result.verificationSent =
+                notifier.sendVerification(account.email, account.username, verificationToken);
+            if (!result.verificationSent) {
+                accounts.recordEvent("correo", "No se pudo enviar el correo de verificacion",
+                                     request.clientIP, created.userID, "");
+            }
             break;
         case CreateAccountOutcome::UsernameTaken:
             result.errors.push_back(RegistrationError::UsernameTaken);
@@ -154,5 +176,6 @@ RegistrationResult RegisterUser::execute(RegistrationRequest request)
             result.errors.push_back(RegistrationError::YubikeyRejected);
             break;
     }
+    wipe(verificationToken);
     return result;
 }

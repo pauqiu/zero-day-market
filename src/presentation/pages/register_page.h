@@ -12,7 +12,7 @@
 Html renderRegisterBody(const std::string& scriptName, const std::string& username,
                         const std::string& email, const std::vector<RegistrationError>& errors);
 
-Html renderRegisterDoneBody(const std::string& scriptName, const std::string& username);
+Html renderRegisterDoneBody(const std::string& scriptName, const RegistrationResult& result);
 
 // Message shown to the user for each error.
 std::string registrationErrorMessage(RegistrationError error);

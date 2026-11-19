@@ -11,7 +11,7 @@ namespace {
 #define FROM_EPOCH "TIMESTAMPADD(SECOND, ?, '1970-01-01 00:00:00')"
 
 constexpr const char* kUserColumns =
-    "SELECT user_id, username, password_hash, status, " EPOCH_OF("locked_until") " FROM users ";
+    "SELECT user_id, username, email, password_hash, status, " EPOCH_OF("locked_until") " FROM users ";
 
 const std::string kFindByUsernameSql = std::string(kUserColumns) + "WHERE username = ?";
 const std::string kFindByEmailSql = std::string(kUserColumns) + "WHERE email = ?";
@@ -139,22 +139,24 @@ void MariaDbAuthRepository::execute(const char* sql, MariaDbParams& params, cons
 std::optional<LoginUser> MariaDbAuthRepository::findUser(const char* sql, MariaDbParams& params)
 {
     MariaDbStatement statement(connection, sql);
-    Row row(5);
+    Row row(6);
     row.asInteger(0);
     row.asString(1);
     row.asString(2);
     row.asString(3);
-    row.asInteger(4);
+    row.asString(4);
+    row.asInteger(5);
     if (!fetchOne(statement, params, row)) {
         return std::nullopt;
     }
     LoginUser user;
     user.userID = static_cast<int>(row.ints[0]);
     user.username = statement.fetchString(1, row.lengths[1], row.nulls[1]).value_or("");
-    user.passwordHash = statement.fetchString(2, row.lengths[2], row.nulls[2]).value_or("");
-    user.status = statement.fetchString(3, row.lengths[3], row.nulls[3]).value_or("");
-    if (!row.nulls[4]) {
-        user.lockedUntil = row.ints[4];
+    user.email = statement.fetchString(2, row.lengths[2], row.nulls[2]).value_or("");
+    user.passwordHash = statement.fetchString(3, row.lengths[3], row.nulls[3]).value_or("");
+    user.status = statement.fetchString(4, row.lengths[4], row.nulls[4]).value_or("");
+    if (!row.nulls[5]) {
+        user.lockedUntil = row.ints[5];
     }
     return user;
 }

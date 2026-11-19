@@ -1,0 +1,8 @@
+{{! Account activation (HU-07). Opening the link only shows this button:
+    the account changes with the POST, never with the GET (row 4). }}
+<h1>Activa tu cuenta</h1>
+<p>Confirma la activación de tu cuenta en el mercado.</p>
+<form class="form" method="post" action="{{formAction}}">
+  <input type="hidden" name="token" value="{{token}}">
+  <button type="submit">Activar cuenta</button>
+</form>

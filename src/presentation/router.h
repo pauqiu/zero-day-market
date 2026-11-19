@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 
+#include "application/accounts/account_activation.h"
 #include "application/accounts/register_user.h"
 #include "application/auth/authentication.h"
 #include "application/catalog/catalog_item.h"
@@ -20,6 +21,8 @@ struct UseCases {
     std::function<std::optional<ObjectDetail>(int objectID)> getObjectDetail;
     std::function<std::optional<ObjectHistory>(int objectID)> getObjectHistory;
     std::function<RegistrationResult(RegistrationRequest request)> registerUser;
+    std::function<ActivationOutcome(const std::string& token, const std::string& clientIP)> activateAccount;
+    std::function<void(const std::string& email, const std::string& clientIP)> resendVerification;
 
     std::function<LoginOutcome(std::string login, std::string password,
                                const std::string& clientIP)> loginWithPassword;

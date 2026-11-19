@@ -1,0 +1,15 @@
+# Mail configuration read by app.cgi (HU-07, HU-13).
+# Install as /etc/jesterschest/mail.conf, owned by root:apache, mode 0640:
+#   sudo install -m 0640 -o root -g apache mail.conf /etc/jesterschest/mail.conf
+#
+# Port 587 with STARTTLS (always required by the application) and authentication.
+url = smtp://172.24.131.105:587
+# The course account. Zimbra rejects a sender different from the account.
+username = CHANGE-ME@nac.ucr.ac.cr
+password = CHANGE-ME
+from = CHANGE-ME@nac.ucr.ac.cr
+# The public key of the server (its certificate is self-signed). Obtain it
+# with deploy/mail-pin.sh and confirm its fingerprint before trusting it.
+pinned_public_key = sha256//CHANGE-ME
+# Base of the links in the emails.
+app_url = https://www.jesterschest.internal/app.cgi

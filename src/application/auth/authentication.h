@@ -11,6 +11,7 @@
 #include "application/accounts/yubikey_otp_decoder.h"
 #include "application/auth/auth_repository.h"
 #include "application/auth/session_tokens.h"
+#include "application/notifications/notifier.h"
 
 // Policy of the login flow (security architecture, rows 3, 5 and 20).
 struct AuthPolicy {
@@ -47,8 +48,8 @@ class Authentication {
         using Clock = std::function<std::int64_t()>;
 
         Authentication(AuthRepository& repository, PasswordHasher& hasher, SecretBox& secrets,
-                       YubikeyOtpDecoder& decoder, SessionTokens& tokens, Clock now,
-                       AuthPolicy policy = AuthPolicy{});
+                       YubikeyOtpDecoder& decoder, SessionTokens& tokens, Notifier& notifier,
+                       Clock now, AuthPolicy policy = AuthPolicy{});
 
         // `login` is the username or the email. The same failure for every
         // reason: unknown user, wrong password, locked or inactive account.
@@ -68,6 +69,10 @@ class Authentication {
         static bool isWellFormedToken(const std::string& token);
 
     private:
+        // Email notices (HU-13). A failed email never changes the outcome.
+        void notifyLock(const LoginUser& user, const std::string& clientIP);
+        void notifyLogin(const LoginUser& user, const std::string& clientIP);
+
         SecondFactorOutcome rejectSecondFactor(const SessionRecord& pending, const std::string& pendingHash,
                                                const std::string& clientIP, const char* reason);
 
@@ -76,6 +81,7 @@ class Authentication {
         SecretBox& secrets;
         YubikeyOtpDecoder& decoder;
         SessionTokens& tokens;
+        Notifier& notifier;
         Clock now;
         AuthPolicy policy;
 };

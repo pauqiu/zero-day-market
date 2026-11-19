@@ -8,6 +8,7 @@
 #   * /etc/jesterschest/mariadb-ca.crt      certificate of VMDatos
 #   * libyubikey from EPEL (see the installation document):
 #       sudo dnf install epel-release && sudo dnf install libyubikey
+#   * /etc/jesterschest/mail.conf           from mail.conf.example (see mail-pin.sh)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -31,6 +32,16 @@ key_key=$(openssl pkey -in /etc/pki/tls/private/jesterschest.key -pubout | sha25
 [ "$cert_key" = "$key_key" ] || { echo "error: the certificate does not match the private key" >&2; exit 1; }
 dnf -y -q install mariadb-connector-c > /dev/null
 rpm -q libyubikey > /dev/null || { echo "error: install libyubikey from EPEL first" >&2; exit 1; }
+# Rocky installs a minimal libcurl by default; the application needs SMTP.
+if ! curl --version | grep -i '^protocols' | grep -qw smtp; then
+    echo "error: this libcurl has no SMTP support; install the full one:" >&2
+    echo "       sudo dnf swap libcurl-minimal libcurl" >&2
+    exit 1
+fi
+[ -f "$CONF_DIR/mail.conf" ] || {
+    echo "error: missing $CONF_DIR/mail.conf (see mail.conf.example and mail-pin.sh)" >&2; exit 1; }
+grep -q "CHANGE-ME" "$CONF_DIR/mail.conf" && {
+    echo "error: $CONF_DIR/mail.conf still has CHANGE-ME values" >&2; exit 1; }
 
 step "Installing app.cgi and static files"
 install -m 0755 -o root -g root "$HERE/app.cgi" /var/www/cgi-bin/app.cgi
@@ -54,6 +65,7 @@ CONF
     unset DB_PASS
 fi
 chown root:apache "$CONF_DIR/db.conf" && chmod 0640 "$CONF_DIR/db.conf"
+chown root:apache "$CONF_DIR/mail.conf" && chmod 0640 "$CONF_DIR/mail.conf"
 chown root:root "$CONF_DIR/mariadb-ca.crt" && chmod 0644 "$CONF_DIR/mariadb-ca.crt"
 
 # Master key that seals the YubiKey secrets (AES-256-GCM). Created once and
@@ -69,6 +81,8 @@ restorecon -R "$CONF_DIR"
 step "SELinux: CGI execution and database connections"
 setsebool -P httpd_enable_cgi on
 setsebool -P httpd_can_network_connect_db on
+# Mail ports only (25, 465, 587), NOT httpd_can_network_connect (any port).
+setsebool -P httpd_can_sendmail on
 
 step "Apache site"
 install -m 0644 -o root -g root "$HERE/jesterschest.conf" /etc/httpd/conf.d/jesterschest.conf

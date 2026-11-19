@@ -1,6 +1,7 @@
 // Unit tests with plain CTest (no third-party framework).
 // Run: ctest --test-dir build --output-on-failure
 
+#include <openssl/evp.h>
 #include <yubikey.h>
 
 #include <array>
@@ -10,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "application/accounts/account_activation.h"
 #include "application/accounts/register_user.h"
 #include "application/auth/authentication.h"
 #include "application/catalog/list_catalog.h"
@@ -20,6 +22,7 @@
 #include "infrastructure/crypto/aes_gcm_secret_box.h"
 #include "infrastructure/crypto/random_session_tokens.h"
 #include "infrastructure/crypto/scrypt_password_hasher.h"
+#include "infrastructure/mail/mail_message.h"
 #include "infrastructure/yubikey/libyubikey_otp_decoder.h"
 #include "presentation/cgi/cgi_request.h"
 #include "presentation/pages/catalog_page.h"
@@ -366,6 +369,14 @@ void testHistoryPage()
 
 // ---------------------------------------------------------------- accounts
 
+bool contains(const std::vector<std::string>& items, const std::string& text)
+{
+    for (const std::string& item : items) {
+        if (item.find(text) != std::string::npos) return true;
+    }
+    return false;
+}
+
 const std::string kTestAesKey = "00112233445566778899aabbccddeeff";
 const std::string kTestPublicID = "cccccbcdefgh";
 
@@ -481,6 +492,31 @@ void testOtpDecoder()
     CHECK(!decoder.decode(otp, "zz112233445566778899aabbccddeeff"));    // not hex
 }
 
+class FakeNotifier : public Notifier {
+    public:
+        bool succeed = true;
+        std::vector<std::string> sent;  // "kind|to|username|detail"
+
+        bool sendVerification(const std::string& to, const std::string& username,
+                              const std::string& token) override
+        {
+            sent.push_back("verification|" + to + "|" + username + "|" + token);
+            return succeed;
+        }
+        bool sendLoginNotice(const std::string& to, const std::string& username, std::int64_t,
+                             const std::string& ip) override
+        {
+            sent.push_back("login|" + to + "|" + username + "|" + ip);
+            return succeed;
+        }
+        bool sendLockNotice(const std::string& to, const std::string& username, std::int64_t,
+                            const std::string& ip) override
+        {
+            sent.push_back("lock|" + to + "|" + username + "|" + ip);
+            return succeed;
+        }
+};
+
 class FakeAccounts : public AccountRepository {
     public:
         CreateAccountOutcome outcome = CreateAccountOutcome::Created;
@@ -498,6 +534,41 @@ class FakeAccounts : public AccountRepository {
         {
             incidents.push_back(std::string(category) + "|" + std::string(ip) + "|" +
                                 std::string(details));
+        }
+
+        // Activation and resend.
+        std::string validTokenHash;
+        int objectsLeft = 100;
+        std::optional<PendingAccount> pending;
+        std::vector<std::string> replacedTokens;
+        std::vector<std::string> events;
+
+        ActivationResult activateAccount(const std::string& tokenHash, std::int64_t, int objects,
+                                         const std::string&) override
+        {
+            ActivationResult result;
+            if (tokenHash == validTokenHash) {
+                result.activated = true;
+                result.username = "colombina";
+                result.objectsAssigned = std::min(objects, objectsLeft);
+                validTokenHash.clear();  // single use
+            }
+            return result;
+        }
+        std::optional<PendingAccount> findPendingAccount(const std::string& email) override
+        {
+            return pending && pending->email == email ? pending : std::nullopt;
+        }
+        void replaceVerificationToken(int, const std::string& tokenHash, std::int64_t expiresAt,
+                                      std::int64_t) override
+        {
+            replacedTokens.push_back(tokenHash);
+            pending->latestTokenExpiresAt = expiresAt;
+        }
+        void recordEvent(std::string_view, std::string_view description, std::string_view,
+                         std::optional<int>, std::string_view) override
+        {
+            events.emplace_back(description);
         }
 };
 
@@ -555,7 +626,10 @@ void testRegisterUser()
     FakeHasher hasher;
     FakeBox box;
     LibyubikeyOtpDecoder decoder;
-    RegisterUser registerUser(accounts, hasher, box, decoder);
+    RandomSessionTokens tokens;
+    FakeNotifier notifier;
+    const std::int64_t now = 1'800'000'000;
+    RegisterUser registerUser(accounts, hasher, box, decoder, tokens, notifier, [now] { return now; });
 
     // Success: secrets reach storage only protected.
     RegistrationResult ok = registerUser.execute(validRegistration());
@@ -572,6 +646,22 @@ void testRegisterUser()
           box.contexts[1] == "yubikey-private-id:" + kTestPublicID);
     CHECK(account.clientIP == "172.24.0.15");
     CHECK(accounts.incidents.empty());
+
+    // Email verification (HU-07): the token goes by email, only its hash is stored.
+    CHECK(account.verificationExpiresAt == now + 24 * 60 * 60);
+    CHECK(notifier.sent.size() == 1 && ok.verificationSent && ok.email == "colombina@nac.ucr.ac.cr");
+    const std::string sentToken = notifier.sent[0].substr(notifier.sent[0].rfind('|') + 1);
+    CHECK(Authentication::isWellFormedToken(sentToken));
+    CHECK(account.verificationTokenHash == tokens.hash(sentToken));
+    CHECK(account.verificationTokenHash != sentToken);
+
+    // A failed email does not undo the account: it is logged, and the page says so.
+    notifier.succeed = false;
+    accounts.created.clear();
+    const RegistrationResult unsent = registerUser.execute(validRegistration());
+    CHECK(unsent.success && !unsent.verificationSent);
+    CHECK(contains(accounts.events, "No se pudo enviar"));
+    notifier.succeed = true;
 
     // Format errors are all reported at once, and nothing is stored.
     accounts.created.clear();
@@ -684,7 +774,7 @@ void testRegistrationRoutes()
     succeed = true;
     const CgiResponse done =
         route(CgiRequest("POST", "/registro", "/app.cgi", "", body, formType, "10.1.1.1"), useCases);
-    CHECK(done.status == 200 && done.body.find("Cuenta creada") != std::string::npos);
+    CHECK(done.status == 200 && done.body.find("Revisa tu correo") != std::string::npos);
 
     CHECK(route(CgiRequest("PUT", "/registro", "/app.cgi", ""), useCases).status == 405);
     CHECK(route(CgiRequest("POST", "/registro", "/app.cgi", "", "{}", "application/json"), useCases)
@@ -814,14 +904,16 @@ struct AuthFixture {
     AesGcmSecretBox box;
     LibyubikeyOtpDecoder decoder;
     RandomSessionTokens tokens;
+    FakeNotifier notifier;
     Authentication auth;
 
     AuthFixture()
         : box(AesGcmSecretBox::fromKey(masterKey)),
-          auth(repository, hasher, box, decoder, tokens, [this] { return clock; })
+          auth(repository, hasher, box, decoder, tokens, notifier, [this] { return clock; })
     {
         FakeAuthRepository::User user;
-        user.login = LoginUser{7, "pierrot", "h:Clave segura 2026", "active", std::nullopt};
+        user.login = LoginUser{7, "pierrot", "pierrot@nac.ucr.ac.cr", "h:Clave segura 2026",
+                               "active", std::nullopt};
         user.email = "pierrot@nac.ucr.ac.cr";
         repository.users[7] = user;
 
@@ -853,14 +945,6 @@ struct AuthFixture {
         return second.status == SecondFactorOutcome::Status::Success ? second.sessionToken : "";
     }
 };
-
-bool contains(const std::vector<std::string>& items, const std::string& text)
-{
-    for (const std::string& item : items) {
-        if (item.find(text) != std::string::npos) return true;
-    }
-    return false;
-}
 
 void testPasswordStep()
 {
@@ -897,8 +981,12 @@ void testLockout()
     CHECK(!f.auth.loginWithPassword("pierrot", "mala 1", "10.0.0.5").success);
     CHECK(!f.auth.loginWithPassword("pierrot", "mala 2", "10.0.0.5").success);
     CHECK(f.repository.incidents.empty());
+    CHECK(f.notifier.sent.empty());
     CHECK(!f.auth.loginWithPassword("pierrot", "mala 3", "10.0.0.5").success);  // locks
     CHECK(contains(f.repository.incidents, "bloqueada"));
+    // RF-2.32: the owner is told, with the address of the attempts.
+    CHECK(f.notifier.sent.size() == 1 &&
+          f.notifier.sent[0] == "lock|pierrot@nac.ucr.ac.cr|pierrot|10.0.0.5");
 
     // Even the right password fails while locked...
     CHECK(!f.auth.loginWithPassword("pierrot", f.password(), "10.0.0.5").success);
@@ -920,6 +1008,14 @@ void testSecondFactor()
     const auto info = f.auth.resolveSession(second.sessionToken);
     CHECK(info && info->fullyAuthenticated && info->username == "pierrot");
     CHECK(f.repository.keys[7].lastCounter == 10);
+    // RF-2.31: notice of the successful login, only after the YubiKey step.
+    CHECK(f.notifier.sent.size() == 1 && f.notifier.sent[0].rfind("login|pierrot@", 0) == 0);
+
+    // A failed notice does not change the outcome; it is logged.
+    AuthFixture quiet;
+    quiet.notifier.succeed = false;
+    CHECK(!quiet.login(10).empty());
+    CHECK(contains(quiet.repository.audits, "No se pudo enviar"));
 
     // Replay: the same OTP in a new login is refused, with an incident (row 21).
     const LoginOutcome again = f.auth.loginWithPassword("pierrot", f.password(), "10.0.0.5");
@@ -1129,6 +1225,131 @@ void testLoginRoutes()
     CHECK(out.status == 303 && loggedOut == std::string(64, 'b') && setsCookie(out, "Max-Age=0"));
 }
 
+
+void testAccountActivation()
+{
+    FakeAccounts accounts;
+    RandomSessionTokens tokens;
+    FakeNotifier notifier;
+    std::int64_t clock = 1'800'000'000;
+    AccountActivation activation(accounts, tokens, notifier, [&clock] { return clock; });
+
+    const std::string token = tokens.newToken();
+    accounts.validTokenHash = tokens.hash(token);
+
+    CHECK(!activation.activate("no-es-un-token", "10.0.0.5").activated);  // never looked up
+    const ActivationOutcome ok = activation.activate(token, "10.0.0.5");
+    CHECK(ok.activated && ok.username == "colombina" && ok.objectsAssigned == kInitialObjectsPerUser);
+    CHECK(!activation.activate(token, "10.0.0.5").activated);  // single use
+    CHECK(contains(accounts.events, "invalido"));
+
+    // Not enough inventory: the user gets what is left.
+    accounts.validTokenHash = tokens.hash(token);
+    accounts.objectsLeft = 2;
+    CHECK(activation.activate(token, "10.0.0.5").objectsAssigned == 2);
+
+    // Resend: nothing for unknown emails...
+    activation.resend("nadie@nac.ucr.ac.cr", "10.0.0.5");
+    CHECK(notifier.sent.empty() && accounts.replacedTokens.empty());
+    // ...a new link for a pending account...
+    accounts.pending = PendingAccount{4, "colombina", "colombina@nac.ucr.ac.cr", std::nullopt};
+    activation.resend("Colombina@NAC.ucr.ac.cr", "10.0.0.5");
+    CHECK(notifier.sent.size() == 1 && accounts.replacedTokens.size() == 1);
+    const std::string resent = notifier.sent[0].substr(notifier.sent[0].rfind('|') + 1);
+    CHECK(accounts.replacedTokens[0] == tokens.hash(resent));
+    // ...but not again within 5 minutes (no inbox flooding)...
+    clock += 4 * 60;
+    activation.resend("colombina@nac.ucr.ac.cr", "10.0.0.5");
+    CHECK(notifier.sent.size() == 1);
+    // ...and again after them.
+    clock += 2 * 60;
+    activation.resend("colombina@nac.ucr.ac.cr", "10.0.0.5");
+    CHECK(notifier.sent.size() == 2);
+}
+
+std::string base64Decode(const std::string& text)
+{
+    std::vector<unsigned char> out(text.size());
+    std::string clean;
+    for (const char c : text) {
+        if (c != '\r' && c != '\n') clean += c;
+    }
+    const int length = EVP_DecodeBlock(out.data(), reinterpret_cast<const unsigned char*>(clean.data()),
+                                       static_cast<int>(clean.size()));
+    std::string decoded(reinterpret_cast<const char*>(out.data()), static_cast<std::size_t>(length));
+    while (!clean.empty() && clean.back() == '=') {  // EVP_DecodeBlock keeps padding bytes
+        clean.pop_back();
+        decoded.pop_back();
+    }
+    return decoded;
+}
+
+void testMailMessage()
+{
+    const std::string body = "Hola, colombina:\n\nActiva tu cuenta: https://www.jesterschest.internal/app.cgi/verificar?token=" +
+                             std::string(64, 'a') + "\n";
+    const auto message = buildMailMessage("tienda@nac.ucr.ac.cr", "colombina@nac.ucr.ac.cr",
+                                          "Activa tu cuenta en Jester's Chest", body, 1'795'120'500);
+    CHECK(message.has_value());
+    const std::string headers = message->substr(0, message->find("\r\n\r\n"));
+    CHECK(headers.find("From: tienda@nac.ucr.ac.cr\r\n") != std::string::npos);
+    CHECK(headers.find("To: colombina@nac.ucr.ac.cr\r\n") != std::string::npos);
+    CHECK(headers.find("Date: Thu, 19 Nov 2026 20:35:00 +0000") != std::string::npos);
+    CHECK(headers.find("Content-Transfer-Encoding: base64") != std::string::npos);
+    const auto subjectStart = headers.find("=?UTF-8?B?") + 10;
+    CHECK(base64Decode(headers.substr(subjectStart, headers.find("?=", subjectStart) - subjectStart)) ==
+          "Activa tu cuenta en Jester's Chest");
+    const std::string encodedBody = message->substr(message->find("\r\n\r\n") + 4);
+    CHECK(base64Decode(encodedBody) == body);
+    for (std::size_t start = 0, end; (end = encodedBody.find("\r\n", start)) != std::string::npos; start = end + 2) {
+        CHECK(end - start <= 76);  // MIME line length
+    }
+
+    // Header injection: addresses with line breaks, spaces or several recipients are refused.
+    CHECK(!buildMailMessage("tienda@nac.ucr.ac.cr", "a@b.com\r\nBcc: x@y.com", "s", "b", 0));
+    CHECK(!buildMailMessage("tienda@nac.ucr.ac.cr", "a@b.com, x@y.com", "s", "b", 0));
+    CHECK(!buildMailMessage("tienda@nac.ucr.ac.cr", "Ana <a@b.com>", "s", "b", 0));
+    CHECK(!buildMailMessage("x\r\nBcc: y@z.com", "a@b.com", "s", "b", 0));
+    // A subject with line breaks cannot reach the headers: it is encoded.
+    const auto tricky = buildMailMessage("tienda@nac.ucr.ac.cr", "a@b.com", "Hola\r\nBcc: x@y.com", "b", 0);
+    CHECK(tricky && tricky->find("Bcc:") == std::string::npos);
+}
+
+void testVerificationRoutes()
+{
+    UseCases useCases;
+    std::string activatedWith, resentTo;
+    useCases.activateAccount = [&](const std::string& token, const std::string&) {
+        activatedWith = token;
+        ActivationOutcome outcome;
+        outcome.activated = token == std::string(64, 'e');
+        outcome.username = "colombina";
+        outcome.objectsAssigned = 5;
+        return outcome;
+    };
+    useCases.resendVerification = [&](const std::string& email, const std::string&) { resentTo = email; };
+    const std::string form = "application/x-www-form-urlencoded";
+    const std::string token(64, 'e');
+
+    // The link only shows a button: the GET never activates (row 4).
+    const CgiResponse link = route(CgiRequest("GET", "/verificar", "/app.cgi", "token=" + token), useCases);
+    CHECK(link.status == 200 && activatedWith.empty());
+    CHECK(link.body.find("method=\"post\"") != std::string::npos && link.body.find(token) != std::string::npos);
+    const CgiResponse badLink = route(CgiRequest("GET", "/verificar", "/app.cgi", "token=%3Cscript%3E"), useCases);
+    CHECK(badLink.body.find("Enlace no válido") != std::string::npos && badLink.body.find("<script>") == std::string::npos);
+
+    const CgiResponse done = route(CgiRequest("POST", "/verificar", "/app.cgi", "", "token=" + token, form), useCases);
+    CHECK(done.status == 200 && activatedWith == token && done.body.find("Recibiste 5 objetos") != std::string::npos);
+    const CgiResponse used = route(CgiRequest("POST", "/verificar", "/app.cgi", "", "token=" + std::string(64, 'f'), form), useCases);
+    CHECK(used.status == 422 && used.body.find("Enlace no válido") != std::string::npos);
+
+    // Resend: the same answer always.
+    const CgiResponse resend = route(CgiRequest("POST", "/verificar/reenviar", "/app.cgi", "",
+                                                "email=ana%40b.com", form), useCases);
+    CHECK(resend.status == 200 && resentTo == "ana@b.com" &&
+          resend.body.find("Si existe una cuenta pendiente") != std::string::npos);
+}
+
 void testRouter()
 {
     UseCases useCases;
@@ -1212,6 +1433,9 @@ int main()
     testSessionLifetime();
     testAccessControlRoutes();
     testLoginRoutes();
+    testAccountActivation();
+    testMailMessage();
+    testVerificationRoutes();
     testTemplateEngine();
     testEmbeddedTemplatesRender();
     testRouter();

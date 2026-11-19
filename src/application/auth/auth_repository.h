@@ -12,6 +12,7 @@
 struct LoginUser {
     int userID = 0;
     std::string username;
+    std::string email;
     std::string passwordHash;
     std::string status;                       // pending, verified, active
     std::optional<std::int64_t> lockedUntil;  // temporary lockout (row 20)

@@ -1,4 +1,10 @@
-{{! Successful registration (HU-06). }}
-<h1>Cuenta creada</h1>
-<p>La cuenta <strong>{{username}}</strong> fue creada y tu YubiKey quedó registrada.</p>
-<p><a href="{{catalogUrl}}">Ir al catálogo</a></p>
+{{! Successful registration (HU-06): the account waits for the email verification. }}
+<h1>Revisa tu correo</h1>
+{{#sent}}
+<p>Creamos la cuenta <strong>{{username}}</strong> y te enviamos un enlace de activación a <strong>{{email}}</strong>.</p>
+<p>Ábrelo en las próximas 24 horas para activar tu cuenta y recibir tus primeros objetos.</p>
+{{/sent}}
+{{^sent}}
+<p>Creamos la cuenta <strong>{{username}}</strong>, pero no pudimos enviar el correo de activación.</p>
+{{/sent}}
+<p class="note">¿No llegó el correo? <a href="{{resendUrl}}">Pide un enlace nuevo</a>.</p>

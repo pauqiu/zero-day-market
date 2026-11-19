@@ -4,7 +4,9 @@
 # paths for the application configuration, and Apache running app.cgi.
 #
 #   sudo apt install build-essential cmake pkg-config libmariadb-dev \
-#                    mariadb-server apache2 openssl libssl-dev libyubikey-dev
+#                    mariadb-server apache2 openssl libssl-dev libyubikey-dev \
+#                    libcurl4-openssl-dev
+#   pip install aiosmtpd --break-system-packages   (for scripts/dev-smtp.py)
 #   ./scripts/dev-setup.sh            # set up (keeps existing data)
 #   ./scripts/dev-setup.sh --reset    # drop the local database and start over
 #
@@ -83,6 +85,28 @@ if [ ! -f "$CONF_DIR/yubikey-master.key" ]; then
 fi
 sudo chown root:www-data "$CONF_DIR/yubikey-master.key"
 sudo chmod 0640 "$CONF_DIR/yubikey-master.key"
+
+step "Mail: local SMTP server certificate and mail.conf (scripts/dev-smtp.py)"
+SMTP_DIR="$HOME/.local/share/jesterschest-dev-smtp"
+mkdir -p "$SMTP_DIR"
+if [ ! -f "$SMTP_DIR/server.crt" ]; then
+    openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj "/CN=dev-smtp" \
+        -keyout "$SMTP_DIR/server.key" -out "$SMTP_DIR/server.crt" 2>/dev/null
+    chmod 600 "$SMTP_DIR/server.key"
+fi
+# Same kind of pin as in production: SHA-256 of the server public key.
+PIN="sha256//$(openssl x509 -in "$SMTP_DIR/server.crt" -noout -pubkey \
+    | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl base64)"
+sudo tee "$CONF_DIR/mail.conf" > /dev/null << CONF
+url = smtp://127.0.0.1:2525
+username = tienda@jesterschest.internal
+password = dev-password
+from = tienda@jesterschest.internal
+pinned_public_key = $PIN
+app_url = http://localhost/app.cgi
+CONF
+sudo chown root:www-data "$CONF_DIR/mail.conf"
+sudo chmod 0640 "$CONF_DIR/mail.conf"
 
 step "Apache: CGI module and site"
 sudo install -d -m 0755 "$WEB_ROOT/static"

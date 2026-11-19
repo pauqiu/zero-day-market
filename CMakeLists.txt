@@ -13,6 +13,8 @@ set(JC_DB_CONFIG_PATH "/etc/jesterschest/db.conf"
     CACHE STRING "Path of the database configuration file read by the CGI")
 set(JC_MASTER_KEY_PATH "/etc/jesterschest/yubikey-master.key"
     CACHE STRING "Path of the master key that seals the YubiKey secrets")
+set(JC_MAIL_CONFIG_PATH "/etc/jesterschest/mail.conf"
+    CACHE STRING "Path of the mail server configuration")
 
 option(JC_WERROR "Treat compiler warnings as errors" ON)
 
@@ -36,6 +38,7 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MARIADB REQUIRED IMPORTED_TARGET libmariadb)
 find_package(OpenSSL REQUIRED)
+find_package(CURL REQUIRED)
 find_path(YUBIKEY_INCLUDE_DIR yubikey.h REQUIRED)
 find_library(YUBIKEY_LIBRARY yubikey REQUIRED)
 
@@ -51,9 +54,11 @@ target_include_directories(domain PUBLIC src)
 
 # --- Application: use cases and the ports they need -------------------------
 add_library(application STATIC
+  src/application/accounts/account_activation.cpp
   src/application/accounts/register_user.cpp
   src/application/auth/authentication.cpp
   src/application/catalog/list_catalog.cpp
+  src/application/common/local_time.cpp
   src/application/objects/get_object_detail.cpp
   src/application/objects/get_object_history.cpp
 )
@@ -72,11 +77,15 @@ add_library(infrastructure STATIC
   src/infrastructure/db/mariadb_catalog_repository.cpp
   src/infrastructure/db/mariadb_object_detail_repository.cpp
   src/infrastructure/db/mariadb_object_history_repository.cpp
+  src/infrastructure/mail/email_notifier.cpp
+  src/infrastructure/mail/mail_config.cpp
+  src/infrastructure/mail/mail_message.cpp
+  src/infrastructure/mail/smtp_transport.cpp
   src/infrastructure/yubikey/libyubikey_otp_decoder.cpp
 )
 target_include_directories(infrastructure SYSTEM PRIVATE "${YUBIKEY_INCLUDE_DIR}")
 target_link_libraries(infrastructure PUBLIC application PkgConfig::MARIADB
-                      OpenSSL::Crypto "${YUBIKEY_LIBRARY}")
+                      OpenSSL::Crypto CURL::libcurl "${YUBIKEY_LIBRARY}")
 
 # --- HTML templates, embedded into the binary at build time ------------------
 file(GLOB TEMPLATE_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/templates/*.html")
@@ -113,7 +122,8 @@ target_link_libraries(presentation PUBLIC application)
 add_executable(webapp src/main.cpp)
 set_target_properties(webapp PROPERTIES OUTPUT_NAME "app.cgi")
 target_compile_definitions(webapp PRIVATE JC_DB_CONFIG_PATH="${JC_DB_CONFIG_PATH}"
-                                          JC_MASTER_KEY_PATH="${JC_MASTER_KEY_PATH}")
+                                          JC_MASTER_KEY_PATH="${JC_MASTER_KEY_PATH}"
+                                          JC_MAIL_CONFIG_PATH="${JC_MAIL_CONFIG_PATH}")
 target_link_libraries(webapp PRIVATE presentation infrastructure)
 
 # --- Tests (plain CTest, no third-party framework) --------------------------

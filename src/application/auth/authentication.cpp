@@ -54,15 +54,33 @@ bool isNewer(int counter, int sessionUse, int lastCounter, int lastSessionUse)
 
 Authentication::Authentication(AuthRepository& repository, PasswordHasher& hasher,
                                SecretBox& secrets, YubikeyOtpDecoder& decoder,
-                               SessionTokens& tokens, Clock now, AuthPolicy policy)
+                               SessionTokens& tokens, Notifier& notifier, Clock now,
+                               AuthPolicy policy)
     : repository(repository),
       hasher(hasher),
       secrets(secrets),
       decoder(decoder),
       tokens(tokens),
+      notifier(notifier),
       now(std::move(now)),
       policy(policy)
 {
+}
+
+void Authentication::notifyLock(const LoginUser& user, const std::string& clientIP)
+{
+    if (!notifier.sendLockNotice(user.email, user.username, now(), clientIP)) {
+        repository.audit("correo", "No se pudo enviar el aviso de bloqueo", clientIP,
+                         user.userID, "");
+    }
+}
+
+void Authentication::notifyLogin(const LoginUser& user, const std::string& clientIP)
+{
+    if (!notifier.sendLoginNotice(user.email, user.username, now(), clientIP)) {
+        repository.audit("correo", "No se pudo enviar el aviso de inicio de sesion", clientIP,
+                         user.userID, "");
+    }
 }
 
 bool Authentication::isWellFormedToken(const std::string& token)
@@ -123,6 +141,7 @@ LoginOutcome Authentication::loginWithPassword(std::string login, std::string pa
         if (lockedNow) {
             repository.incident("autenticacion", "Cuenta bloqueada por intentos fallidos",
                                 clientIP, user->userID, "factor=contrasena");
+            notifyLock(*user, clientIP);
         }
         return {};
     }
@@ -162,6 +181,9 @@ SecondFactorOutcome Authentication::rejectSecondFactor(const SessionRecord& pend
         repository.deleteSession(pendingHash);
         repository.incident("autenticacion", "Cuenta bloqueada por intentos fallidos",
                             clientIP, pending.userID, "factor=yubikey");
+        if (const auto user = repository.findUserByID(pending.userID)) {
+            notifyLock(*user, clientIP);
+        }
         return {SecondFactorOutcome::Status::Locked, ""};
     }
     return {SecondFactorOutcome::Status::Rejected, ""};
@@ -266,6 +288,7 @@ SecondFactorOutcome Authentication::verifySecondFactor(const std::string& pendin
     session.expiresAt = current + policy.maxSessionSeconds;
     repository.createSession(session);
     repository.audit("autenticacion", "Inicio de sesion exitoso", clientIP, pending->userID, "");
+    notifyLogin(*user, clientIP);
     return outcome;
 }
 
