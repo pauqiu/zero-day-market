@@ -143,7 +143,8 @@ int main()
         response = route(request, useCases);
     } catch (const std::exception& error) {
         // Details go to Apache's error log, never to the visitor.
-        std::cerr << "app.cgi: " << error.what() << '\n';
+        // One write, so Apache keeps it on one log line.
+        std::cerr << (std::string("app.cgi: ") + error.what() + "\n");
         response = errorResponse(500, "Error del servidor",
                                  "No se pudo completar la solicitud. Intenta de nuevo más tarde.",
                                  request.scriptName());

@@ -13,6 +13,13 @@ namespace {
 // TODO: take it from the Local entity, like the page header.
 constexpr const char* kStoreName = "Jester's Chest";
 
+// One write per message: std::cerr is unbuffered, and Apache logs each write
+// of a CGI as its own line, so "a" << "b" would be split into two lines.
+void logLine(const std::string& text)
+{
+    std::cerr << ("app.cgi: " + text + "\n");
+}
+
 }  // namespace
 
 EmailNotifier::EmailNotifier(std::string configPath, Clock now)
@@ -27,13 +34,13 @@ bool EmailNotifier::deliver(const std::string& to, const std::string& subject,
         const MailConfig config = loadMailConfig(configPath);
         const auto message = buildMailMessage(config.from, to, subject, body(config.appUrl), now());
         if (!message) {
-            std::cerr << "app.cgi: mail not sent: invalid address\n";
+            logLine("mail not sent: invalid address");
             return false;
         }
         SmtpTransport(config).send(to, *message);
         return true;
     } catch (const std::exception& error) {
-        std::cerr << "app.cgi: mail not sent: " << error.what() << '\n';
+        logLine(std::string("mail not sent: ") + error.what());
         return false;
     }
 }
